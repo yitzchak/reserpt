@@ -19,7 +19,7 @@
   :homepage "https://github.com/yitzchak/reserpt"
   :bug-tracker "https://github.com/yitzchak/reserpt/issues"
   :depends-on ("reserpt")
-  :perform (asdf:test-op (op c) (uiop:symbol-call :reserpt :do-tests :exit t))
+  :perform (asdf:test-op (op c) (uiop:symbol-call :reserpt :do-tests :reserpt :exit t))
   :components ((:module code
                 :pathname "code/test/"
                 :serial t

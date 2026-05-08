@@ -1,5 +1,6 @@
 (cl:defpackage #:reserpt
   (:use :cl)
+  (:nicknames #:r)
   (:export #:*do-tests-when-defined*
            #:*compile-tests*
            #:*test*

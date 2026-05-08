@@ -31,12 +31,11 @@
 (declaim (ftype (function (t &rest t) t) report-error))
 (declaim (ftype (function (t &optional t) t) do-entry))
 
+(defvar *test-number* 0)
 (defvar *test* nil "Current test name")
 (defvar *do-tests-when-defined* nil)
-(defvar *entries* (list nil) "Test database.  Has a leading dummy cell that does not contain an entry.")
-(defvar *entries-tail* *entries* "Tail of the *entries* list")
-(defvar *entries-table* (make-hash-table :test #'equal)
-    "Map the names of entries to the cons cell in *entries* that precedes the one whose car is the entry.")
+(defvar *entries* nil
+  "Test database.  Has a leading dummy cell that does not contain an entry.")
 (defvar *in-test* nil "Used by TEST")
 (defvar *debug* nil "For debugging")
 (defvar *catch-errors* t "When true, causes errors in a test to be caught.")
@@ -69,8 +68,14 @@
 (defvar *notes* (make-hash-table :test 'equal)
   "A mapping from names of notes to note objects.")
 
-(defstruct (entry (:conc-name nil))
-  pend name props form test-function vals)
+(defstruct entry
+  (number (incf *test-number*))
+  pend
+  name
+  props
+  form
+  test-function
+  vals)
 
 ;;; Note objects are used to attach information to tests.
 ;;; A typical use is to mark tests that depend on a particular
@@ -80,18 +85,17 @@
 (defstruct note
   name
   contents
-  disabled ;; When true, tests with this note are considered inactive
-  )
+  disabled) ;; When true, tests with this note are considered inactive
 
 ;; (defmacro vals (entry) `(cdddr ,entry))
 
 (defmacro defn (entry)
   (let ((var (gensym)))
     `(let ((,var ,entry))
-       (list* (name ,var) (form ,var) (vals ,var)))))
+       (list* (entry-name ,var) (entry-form ,var) (entry-vals ,var)))))
 
 (defun entry-notes (entry)
-  (let* ((props (props entry))
+  (let* ((props (entry-props entry))
          (notes (getf props :notes)))
     (if (listp notes)
         notes
@@ -111,39 +115,41 @@
   (and note (not (not (member note (entry-notes entry))))))
 
 (defun pending-tests ()
-  (loop for entry in (cdr *entries*)
-        when (and (pend entry) (not (has-disabled-note entry)))
-        collect (name entry)))
+  (loop for entry in *entries*
+        when (and (entry-pend entry) (not (has-disabled-note entry)))
+        collect (entry-name entry)))
 
-(defun rem-all-tests ()
-  (setq *entries* (list nil))
-  (setq *entries-tail* *entries*)
-  (clrhash *entries-table*)
-  nil)
+(defun rem-all-tests (package)
+  (with-package-iterator (next-symbol package :internal :external)
+    (tagbody
+     next
+       (multiple-value-bind (presentp symbol)
+           (next-symbol)
+         (when presentp
+           (remprop symbol :reserpt)
+           (go next))))))
 
 (defun rem-test (&optional (name *test*))
-  (let ((pred (gethash name *entries-table*)))
-    (when pred
-      (if (null (cddr pred))
-          (setq *entries-tail* pred)
-        (setf (gethash (name (caddr pred)) *entries-table*) pred))
-      (setf (cdr pred) (cddr pred))
-      (remhash name *entries-table*)
-      name)))
+  (remprop name :reserpt))
 
 (defun get-test (&optional (name *test*))
   (defn (get-entry name)))
 
 (defun get-entry (name)
-  (let ((entry ;; (find name (the list (cdr *entries*))
-               ;;     :key #'name :test #'equal)
-         (cadr (gethash name *entries-table*))
-         ))
-    (when (null entry)
-      (report-error t
-        "~%No test with name ~:@(~S~)."
-        name))
-    entry))
+  (or (get name :reserpt)
+      (error "~%No test with name ~:@(~S~)." name)))
+
+(defun get-entries (package)
+  (with-package-iterator (next-symbol package :internal :external)
+    (prog (entries entry)
+     next
+       (multiple-value-bind (presentp symbol)
+           (next-symbol)
+         (when presentp
+           (when (setf entry (get-entry symbol))
+             (setf entries (merge 'list entries (list entry) #'< :key #'entry-number)))
+           (go next)))
+       (return entries))))
 
 (defmacro deftest (name &rest body)
   (let* ((p body)
@@ -163,21 +169,14 @@
 
 (defun add-entry (entry)
   (setq entry (copy-entry entry))
-  (let* ((pred (gethash (name entry) *entries-table*)))
-    (cond
-     (pred
-      (setf (cadr pred) entry)
-      (report-error nil
-        "Redefining test ~:@(~S~)"
-        (name entry)))
-     (t
-      (setf (gethash (name entry) *entries-table*) *entries-tail*)
-      (setf (cdr *entries-tail*) (cons entry nil))
-      (setf *entries-tail* (cdr *entries-tail*))
-      )))
+  (let ((previous-entry (get (entry-name entry) :reserpt)))
+    (when previous-entry
+      (setf (entry-number entry) (entry-number previous-entry))
+      (warn "Redefining test ~:@(~S~)" (entry-name entry))))
+  (setf (get (entry-name entry) :reserpt) entry)
   (when *do-tests-when-defined*
     (do-entry entry))
-  (setq *test* (name entry)))
+  (setq *test* (entry-name entry)))
 
 (defun report-error (error? &rest args)
   (cond (*debug*
@@ -250,18 +249,18 @@
           (compile nil lambda-expr)))))
 
 (defun compile-test-function (entry)
-  (or (test-function entry)
-      (setf (test-function entry)
+  (or (entry-test-function entry)
+      (setf (entry-test-function entry)
             (compile* `(lambda ()
                          (declare (optimize ,@*optimization-settings*))
-                         ,(form entry))
+                         ,(entry-form entry))
                       (has-note entry :do-not-muffle-warnings)))))
 
 (defun do-entry (entry &optional
                        (s *standard-output*))
   (catch '*in-test*
-    (setq *test* (name entry))
-    (setf (pend entry) t)
+    (setq *test* (entry-name entry))
+    (setf (entry-pend entry) t)
     (let* ((*in-test* t)
            ;; (*break-on-warnings* t)
            (aborted nil)
@@ -283,10 +282,10 @@
                               (funcall (compile-test-function entry))))
                             (*expanded-eval*
                              (multiple-value-list
-                              (expanded-eval (form entry))))
+                              (expanded-eval (entry-form entry))))
                             (t
                              (multiple-value-list
-                              (eval (form entry))))))))
+                              (eval (entry-form entry))))))))
                 (if *catch-errors*
                     (handler-bind
                      ((style-warning #'(lambda (c) (if (has-note entry :do-not-muffle-warnings)
@@ -299,15 +298,15 @@
                       (%do))
                     (%do)))))
 
-      (setf (pend entry)
+      (setf (entry-pend entry)
             (or aborted
-                (not (equalp-with-case r (vals entry)))))
+                (not (equalp-with-case r (entry-vals entry)))))
 
-      (when (pend entry)
+      (when (entry-pend entry)
         (let ((*print-circle* *print-circle-on-failure*))
           (format s "~&Test ~:@(~S~) failed~%Form: ~S~%Expected value~P:~%"
-                  *test* (form entry) (length (vals entry)))
-          (dolist (v (vals entry)) (format s "~10t~S~%" v))
+                  *test* (entry-form entry) (length (entry-vals entry)))
+          (dolist (v (entry-vals entry)) (format s "~10t~S~%" v))
           (handler-case
               (progn
                 (format s "Actual value~P:~%" (length r))
@@ -316,7 +315,7 @@
                           v (typep v 'condition))))
             (error () (format s "Actual value: #<error during printing>~%")))
           (finish-output s)))))
-  (when (not (pend entry)) *test*))
+  (when (not (entry-pend entry)) *test*))
 
 (defun expanded-eval (form)
   "Split off top level of a form and eval separately.  This reduces the chance that
@@ -381,47 +380,48 @@ item is a keyword then disable the note by that name. Otherwise add the test
 name to *expected-failures*. If expected-failures is a string or a pathname
 then repeatedly READ each symbol from the file and use the same logic as
 above. if-does-not-exist is passed to OPEN so it behaves as it does there."
-  (let ((*package* (find-package "CL-USER")))
-    (flet ((add-expected-failure (name)
-             (cond ((and (keywordp name) (disable-note name nil)))
-                   ((member name (cdr *entries*) :key #'name)
-                    (push name *expected-failures*))
-                   (t
-                    (push name *unknown-expected-failures*)))))
-      (maphash (lambda (key note)
-                 (declare (ignore key))
-                 (enable-note note))
-               *notes*)
-      (setf *expected-failures* nil)
-      (if (or (stringp expected-failures)
-              (pathnamep expected-failures))
-          (with-open-file (stream expected-failures :if-does-not-exist if-does-not-exist)
-            (cond (stream
-                   (format t "Loading expected failures from ~s~%" expected-failures)
-                   (do ((name (read stream nil stream) (read stream nil stream)))
-                       ((eq name stream))
-                     (add-expected-failure name)))
-                  (t
-                   (format t "Expected failures file ~s not found~%" expected-failures))))
-          (dolist (name expected-failures)
-            (add-expected-failure name))))
-    (setq *unknown-expected-failures* (nreverse *unknown-expected-failures*)
-          *expected-failures* (nreverse *expected-failures*))))
+  (flet ((add-expected-failure (name)
+           (cond ((and (keywordp name) (disable-note name nil)))
+                 ((member name *entries* :key #'entry-name)
+                  (push name *expected-failures*))
+                 (t
+                  (push name *unknown-expected-failures*)))))
+    (maphash (lambda (key note)
+               (declare (ignore key))
+               (enable-note note))
+             *notes*)
+    (setf *expected-failures* nil)
+    (if (or (stringp expected-failures)
+            (pathnamep expected-failures))
+        (with-open-file (stream expected-failures :if-does-not-exist if-does-not-exist)
+          (cond (stream
+                 (format t "Loading expected failures from ~s~%" expected-failures)
+                 (do ((name (read stream nil stream) (read stream nil stream)))
+                     ((eq name stream))
+                   (add-expected-failure name)))
+                (t
+                 (format t "Expected failures file ~s not found~%" expected-failures))))
+        (dolist (name expected-failures)
+          (add-expected-failure name))))
+  (setq *unknown-expected-failures* (nreverse *unknown-expected-failures*)
+        *expected-failures* (nreverse *expected-failures*)))
 
 (defparameter *sandbox-path* (ignore-errors (truename #P"sandbox/")))
 
-(defun do-tests (&key (out *standard-output*)
+(defun do-tests (package
+                 &key (out *standard-output*)
                       ((:catch-errors *catch-errors*) *catch-errors*)
                       ((:compile *compile-tests*) *compile-tests*)
                       (expected-failures nil expected-failures-p)
                       exit)
-  (let ((*package* (find-package "CL-USER")))
-    (setq *failed-tests* nil
-          *passed-tests* nil
-          *unexpected-failures* nil
-          *unexpected-successes* nil)
-    (dolist (entry (cdr *entries*))
-      (setf (pend entry) t))
+  (let* ((*package* (find-package package))
+         (*entries* (get-entries *package*))
+         (*failed-tests* nil)
+         (*passed-tests* nil)
+         (*unexpected-failures* nil)
+         (*unexpected-successes* nil))
+    (dolist (entry *entries*)
+      (setf (entry-pend entry) t))
     (when expected-failures-p
       (load-expected-failures expected-failures))
     (let* ((*default-pathname-defaults* *sandbox-path*)
@@ -459,10 +459,10 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
              (>= n remaining-number-of-entries)))
       (let ((entry (first current-entries)))
         (unless (has-note entry :do-not-muffle-warnings)
-          (push `(setf (test-function ,entry)
+          (push `(setf (entry-test-function ,entry)
                        (lambda ()
                          (declare (optimize ,@*optimization-settings*))
-                         ,(form entry)))
+                         ,(entry-form entry)))
                 body))))
     (multiple-value-bind (function warnings-p failure-p)
         (handler-case
@@ -474,39 +474,40 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
           (funcall function)
           (if (= batch-size 1)
               (format stream "~&Cannot compile test function for entry ~A.~%"
-                      (name (first remaining-entries)))
+                      (entry-name (first remaining-entries)))
               ;; Something went wrong, try to narrow down where
               (compile-entries stream remaining-entries
                                batch-size (floor batch-size 2)
                                t))))))
 
 (defun do-entries (s)
-  (let ((count (count t (the list (cdr *entries*)) :key #'pend)))
+  (let ((count (count t (the list *entries*) :key #'entry-pend)))
     (format s "~&Doing ~A pending test~:P of ~A test~:P total.~%"
-            count (length (cdr *entries*)))
+            count (length *entries*))
     (finish-output s)
     (when *compile-tests*
-      (compile-entries s (cdr *entries*)))
-    (dolist (entry (cdr *entries*))
-      (when (and (pend entry)
+      (compile-entries s *entries*))
+    (dolist (entry *entries*)
+      (when (and (entry-pend entry)
                  (not (has-disabled-note entry)))
         (let ((success? (do-entry entry s)))
           (cond (success?
-                 (push (name entry) *passed-tests*)
-                 (when (member (name entry) *expected-failures*)
-                   (push (name entry) *unexpected-successes*)))
+                 (push (entry-name entry) *passed-tests*)
+                 (when (member (entry-name entry) *expected-failures*)
+                   (push (entry-name entry) *unexpected-successes*)))
                 (t
-                 (push (name entry) *failed-tests*)
-                 (unless (member (name entry) *expected-failures*)
-                   (push (name entry) *unexpected-failures*))))
+                 (push (entry-name entry) *failed-tests*)
+                 (unless (member (entry-name entry) *expected-failures*)
+                   (push (entry-name entry) *unexpected-failures*))))
           (format s "~@[~<~%~:; ~:@(~S~)~>~]" success?))
         (finish-output s)))
     (setq *passed-tests* (nreverse *passed-tests*)
           *failed-tests* (nreverse *failed-tests*)
           *unexpected-failures* (nreverse *unexpected-failures*)
           *unexpected-successes* (nreverse *unexpected-successes*))
-    (format s "~&~@[Found unknown test or note names in expected failure list:~
-               ~%  ~<~@{~S~^, ~:_~}~:>~%~]~
+    (format s
+            "~&~@[Found unknown test or note names in expected failure list:~
+                  ~%  ~<~@{~S~^, ~:_~}~:>~%~]~
              ~A failure~:P with ~A unexpected failure~:P and ~A unexpected ~
              success~:*~[es~;~:;es~] out of ~A test~:P.~%~
              ~:[No failures~;~:*Failures: ~{~%  ~S~}~]~%~
@@ -519,7 +520,11 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
             *unexpected-successes*)
     (terpri)
     (finish-output s)
-    (null *unexpected-failures*)))
+    (values (null *unexpected-failures*)
+            *passed-tests*
+            *failed-tests*
+            *unexpected-failures*
+            *unexpected-successes*)))
 
 ;;; Note handling functions and macros
 
@@ -555,16 +560,18 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 
 ;;; Extended random regression
 
-(defun do-extended-tests (&key (tests *passed-tests*) (count nil)
+(defun do-extended-tests (package
+                          &key (tests *passed-tests*) (count nil)
                                ((:catch-errors *catch-errors*) *catch-errors*)
                                ((:compile *compile-tests*) *compile-tests*))
   "Execute randomly chosen tests from TESTS until one fails or until
    COUNT is an integer and that many tests have been executed."
-  (let ((*package* (find-package "CL-USER"))
-        (*default-pathname-defaults* (make-pathname :directory (append (pathname-directory (or *compile-file-pathname*
-                                                                                               *load-pathname*
-                                                                                               *default-pathname-defaults*))
-                                                                       '("sandbox"))))
+  (let* ((*package* (find-package package))
+         (*entries* (get-entries *package*))
+         (*default-pathname-defaults* (make-pathname :directory (append (pathname-directory (or *compile-file-pathname*
+                                                                                                *load-pathname*
+                                                                                                *default-pathname-defaults*))
+                                                                        '("sandbox"))))
         (test-vector (coerce tests 'simple-vector)))
     (let ((n (length test-vector)))
       (when (= n 0) (error "Must provide at least one test."))

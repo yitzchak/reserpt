@@ -31,8 +31,7 @@
   `(do-setup '(progn ., body)))
 
 (defmacro with-blank-tests (&body body)
-  `(let ((reserpt::*entries* (list nil))
-         (reserpt::*entries-table* (make-hash-table :test #'equal))
+  `(let ((reserpt::*entries* nil)
          (*test* nil)
          (reserpt::*in-test* nil))
     (let ((reserpt::*entries-tail* reserpt::*entries*))
