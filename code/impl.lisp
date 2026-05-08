@@ -100,10 +100,9 @@
       (list notes))))
 
 (defun has-disabled-note (entry)
-  (let ((notes (entry-notes entry)))
-    (loop for n in notes
-          for note = (get note :reserpt)
-          thereis (and note (note-disabled note)))))
+  (loop for name in (entry-notes entry)
+        for note = (get name :reserpt)
+        thereis (and note (note-disabled note))))
 
 (defun has-note (entry note)
   (unless (note-p note)
