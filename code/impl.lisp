@@ -26,7 +26,7 @@
 
 (in-package #:reserpt)
 
-(declaim (ftype (function (t) t) get-entry expanded-eval do-entries))
+(declaim (ftype (function (t) t) expanded-eval do-entries))
 (declaim (type list *entries*))
 (declaim (ftype (function (t &rest t) t) report-error))
 (declaim (ftype (function (t &optional t) t) do-entry))
@@ -65,9 +65,6 @@
 (defvar *unexpected-failures* nil
   "A list of tests that failed but were not expected to fail.")
 
-(defvar *notes* (make-hash-table :test 'equal)
-  "A mapping from names of notes to note objects.")
-
 (defstruct entry
   (number (incf *test-number*))
   pend
@@ -89,10 +86,11 @@
 
 ;; (defmacro vals (entry) `(cdddr ,entry))
 
-(defmacro defn (entry)
+#|(defmacro defn (entry)
   (let ((var (gensym)))
     `(let ((,var ,entry))
        (list* (entry-name ,var) (entry-form ,var) (entry-vals ,var)))))
+|#
 
 (defun entry-notes (entry)
   (let* ((props (entry-props entry))
@@ -104,13 +102,12 @@
 (defun has-disabled-note (entry)
   (let ((notes (entry-notes entry)))
     (loop for n in notes
-          for note = (if (note-p n) n
-                       (gethash n *notes*))
+          for note = (get note :reserpt)
           thereis (and note (note-disabled note)))))
 
 (defun has-note (entry note)
   (unless (note-p note)
-    (let ((new-note (gethash note *notes*)))
+    (let ((new-note (get note :reserpt)))
       (setf note new-note)))
   (and note (not (not (member note (entry-notes entry))))))
 
@@ -132,12 +129,8 @@
 (defun rem-test (&optional (name *test*))
   (remprop name :reserpt))
 
-(defun get-test (&optional (name *test*))
-  (defn (get-entry name)))
-
-(defun get-entry (name)
-  (or (get name :reserpt)
-      (error "~%No test with name ~:@(~S~)." name)))
+#|(defun get-test (&optional (name *test*))
+  (defn (get-entry name)))|#
 
 (defun get-entries (package)
   (with-package-iterator (next-symbol package :internal :external)
@@ -146,10 +139,24 @@
        (multiple-value-bind (presentp symbol)
            (next-symbol)
          (when presentp
-           (when (setf entry (get-entry symbol))
+           (when (entry-p (setf entry (get symbol :reserpt)))
              (setf entries (merge 'list entries (list entry) #'< :key #'entry-number)))
            (go next)))
        (return entries))))
+
+(defun add-entry (entry)
+  (setq entry (copy-entry entry))
+  (let ((previous (get (entry-name entry) :reserpt)))
+    (typecase previous
+      (entry
+       (warn "Redefining entry ~:@(~S~)" (entry-name entry)))
+      (null)
+      (t
+       (error "Name conflict for entry ~:@(~S~)" (entry-name entry)))))
+  (setf (get (entry-name entry) :reserpt) entry)
+  (when *do-tests-when-defined*
+    (do-entry entry))
+  (setq *test* (entry-name entry)))
 
 (defmacro deftest (name &rest body)
   (let* ((p body)
@@ -167,16 +174,6 @@
                             :form ',form
                             :vals ',vals))))
 
-(defun add-entry (entry)
-  (setq entry (copy-entry entry))
-  (let ((previous-entry (get (entry-name entry) :reserpt)))
-    (when previous-entry
-      (setf (entry-number entry) (entry-number previous-entry))
-      (warn "Redefining test ~:@(~S~)" (entry-name entry))))
-  (setf (get (entry-name entry) :reserpt) entry)
-  (when *do-tests-when-defined*
-    (do-entry entry))
-  (setq *test* (entry-name entry)))
 
 (defun report-error (error? &rest args)
   (cond (*debug*
@@ -186,13 +183,13 @@
         (t (apply #'warn args)))
   nil)
 
-(defun do-test (&optional (name *test*) &rest key-args)
-  (flet ((%parse-key-args
-          (&key
-           ((:catch-errors *catch-errors*) *catch-errors*)
-           ((:compile *compile-tests*) *compile-tests*))
-          (do-entry (get-entry name))))
-    (apply #'%parse-key-args key-args)))
+(defun do-test (name
+                &key ((:catch-errors *catch-errors*) *catch-errors*)
+                     ((:compile *compile-tests*) *compile-tests*)
+                &aux (entry (get name :reserpt)))
+  (if (entry-p entry)
+      (do-entry entry)
+      (error "~%No test with name ~:@(~S~)." name)))
 
 (defun my-aref (a &rest args)
   (apply #'aref a args))
@@ -380,16 +377,18 @@ item is a keyword then disable the note by that name. Otherwise add the test
 name to *expected-failures*. If expected-failures is a string or a pathname
 then repeatedly READ each symbol from the file and use the same logic as
 above. if-does-not-exist is passed to OPEN so it behaves as it does there."
-  (flet ((add-expected-failure (name)
-           (cond ((and (keywordp name) (disable-note name nil)))
-                 ((member name *entries* :key #'entry-name)
-                  (push name *expected-failures*))
-                 (t
-                  (push name *unknown-expected-failures*)))))
-    (maphash (lambda (key note)
+  (flet ((add-expected-failure (name &aux (val (get name :reserpt)))
+           (typecase val
+             (note
+              (setf (note-disabled val) t))
+             (entry
+              (push name *expected-failures*))
+             (t
+              (push name *unknown-expected-failures*)))))
+    #|(maphash (lambda (key note)
                (declare (ignore key))
-               (enable-note note))
-             *notes*)
+               (setf (note-disabled note) nil))
+             *notes*)|#
     (setf *expected-failures* nil)
     (if (or (stringp expected-failures)
             (pathnamep expected-failures))
@@ -528,15 +527,23 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 
 ;;; Note handling functions and macros
 
-(defmacro defnote (name contents &optional disabled)
-  `(eval-when (:load-toplevel :execute)
-     (let ((note (make-note :name ',name
-                            :contents ',contents
-                            :disabled ',disabled)))
-       (setf (gethash (note-name note) *notes*) note)
-       note)))
+(defun add-note (note)
+  (setq note (copy-note note))
+  (let ((previous (get (note-name note) :reserpt)))
+    (typecase previous
+      (note
+       (warn "Redefining note ~:@(~S~)" (note-name note)))
+      (null)
+      (t
+       (error "Name conflict for note ~:@(~S~)" (note-name note)))))
+  (setf (get (note-name note) :reserpt) note))
 
-(defun disable-note (n &optional (errorp t))
+(defmacro defnote (name contents &optional disabled)
+  `(add-note (make-note :name ',name
+                        :contents ',contents
+                        :disabled ',disabled)))
+
+#|(defun disable-note (n &optional (errorp t))
   (let ((note (if (note-p n) n
                   (setf n (gethash n *notes*)))))
     (cond (note
@@ -556,7 +563,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
           (errorp
            (error "~A is not a note or note name." n))
           (t
-           nil))))
+           nil))))|#
 
 ;;; Extended random regression
 
