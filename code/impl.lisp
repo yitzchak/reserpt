@@ -35,7 +35,9 @@
 (defvar *test* nil "Current test name")
 (defvar *do-tests-when-defined* nil)
 (defvar *entries* nil
-  "Test database.  Has a leading dummy cell that does not contain an entry.")
+  "Test database.")
+(defvar *items* nil
+  "Note database")
 (defvar *in-test* nil "Used by TEST")
 (defvar *debug* nil "For debugging")
 (defvar *catch-errors* t "When true, causes errors in a test to be caught.")
@@ -101,7 +103,7 @@
 
 (defun has-disabled-note (entry)
   (loop for name in (entry-notes entry)
-        for note = (get name :reserpt)
+        for note = (gethash name *items*)
         thereis (and note (note-disabled note))))
 
 (defun has-note (entry note)
@@ -133,15 +135,25 @@
 
 (defun get-entries (package)
   (with-package-iterator (next-symbol package :internal :external)
-    (prog (entries entry)
+    (prog ((entries nil)
+           (items (make-hash-table :test #'eq))
+           (item nil))
      next
        (multiple-value-bind (presentp symbol)
            (next-symbol)
          (when presentp
-           (when (entry-p (setf entry (get symbol :reserpt)))
-             (setf entries (merge 'list entries (list entry) #'< :key #'entry-number)))
+           (typecase (setf item (get symbol :reserpt))
+             (entry
+              (setf item (copy-entry item)
+                    (gethash (entry-name item) items) item
+                    entries (merge 'list entries (list (copy-entry item)) #'< :key #'entry-number)))
+             (note
+              (setf (gethash (note-name item) items) (copy-note item)))
+             (null)
+             (t
+              (error "Unknown reserpt object")))
            (go next)))
-       (return entries))))
+       (return (values entries items)))))
 
 (defun add-entry (entry)
   (setq entry (copy-entry entry))
@@ -376,10 +388,10 @@ item is a keyword then disable the note by that name. Otherwise add the test
 name to *expected-failures*. If expected-failures is a string or a pathname
 then repeatedly READ each symbol from the file and use the same logic as
 above. if-does-not-exist is passed to OPEN so it behaves as it does there."
-  (flet ((add-expected-failure (name &aux (val (get name :reserpt)))
-           (typecase val
+  (flet ((add-expected-failure (name &aux (item (gethash name *items*)))
+           (typecase item
              (note
-              (setf (note-disabled val) t))
+              (setf (note-disabled item) t))
              (entry
               (push name *expected-failures*))
              (t
@@ -412,25 +424,29 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                       ((:compile *compile-tests*) *compile-tests*)
                       (expected-failures nil expected-failures-p)
                       exit)
-  (let* ((*package* (find-package package))
-         (*entries* (get-entries *package*))
-         (*failed-tests* nil)
-         (*passed-tests* nil)
-         (*unexpected-failures* nil)
-         (*unexpected-successes* nil))
-    (dolist (entry *entries*)
-      (setf (entry-pend entry) t))
-    (when expected-failures-p
-      (load-expected-failures expected-failures))
-    (let* ((*default-pathname-defaults* *sandbox-path*)
-           (successp (if (streamp out)
-                         (do-entries out)
-                         (with-open-file
-                             (stream out :direction :output)
-                           (do-entries stream)))))
-      (when exit
-        (exit successp))
-      successp)))
+  (let ((*package* (find-package package))
+        (*failed-tests* nil)
+        (*passed-tests* nil)
+        (*unexpected-failures* nil)
+        (*unexpected-successes* nil))
+    (multiple-value-bind (*entries* *items*)
+        (get-entries *package*)
+      (dolist (entry *entries*)
+        (setf (entry-pend entry) t))
+      (when expected-failures-p
+        (load-expected-failures expected-failures)
+        (loop for entry in *entries*
+              when (has-disabled-note entry)
+                do (setf (entry-pend entry) nil)))
+      (let* ((*default-pathname-defaults* *sandbox-path*)
+             (successp (if (streamp out)
+                           (do-entries out)
+                           (with-open-file
+                               (stream out :direction :output)
+                             (do-entries stream)))))
+        (when exit
+          (exit successp))
+        successp))))
 
 (defun compile-entries
     (stream entries
@@ -486,8 +502,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
     (when *compile-tests*
       (compile-entries s *entries*))
     (dolist (entry *entries*)
-      (when (and (entry-pend entry)
-                 (not (has-disabled-note entry)))
+      (when (entry-pend entry)
         (let ((success? (do-entry entry s)))
           (cond (success?
                  (push (entry-name entry) *passed-tests*)
