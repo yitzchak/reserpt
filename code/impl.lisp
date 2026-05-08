@@ -69,12 +69,14 @@
 
 (defstruct entry
   (number (incf *test-number*))
-  pend
+  pending
   name
+  notes
   props
   form
   test-function
-  vals)
+  vals
+  (enabled t))
 
 ;;; Note objects are used to attach information to tests.
 ;;; A typical use is to mark tests that depend on a particular
@@ -84,7 +86,7 @@
 (defstruct note
   name
   contents
-  disabled) ;; When true, tests with this note are considered inactive
+  (enabled t))
 
 ;; (defmacro vals (entry) `(cdddr ,entry))
 
@@ -94,28 +96,11 @@
        (list* (entry-name ,var) (entry-form ,var) (entry-vals ,var)))))
 |#
 
-(defun entry-notes (entry)
-  (let* ((props (entry-props entry))
-         (notes (getf props :notes)))
-    (if (listp notes)
-        notes
-      (list notes))))
-
-(defun has-disabled-note (entry)
-  (loop for name in (entry-notes entry)
-        for note = (gethash name *items*)
-        thereis (and note (note-disabled note))))
-
 (defun has-note (entry note)
   (unless (note-p note)
     (let ((new-note (get note :reserpt)))
       (setf note new-note)))
   (and note (not (not (member note (entry-notes entry))))))
-
-(defun pending-tests ()
-  (loop for entry in *entries*
-        when (and (entry-pend entry) (not (has-disabled-note entry)))
-        collect (entry-name entry)))
 
 (defun rem-all-tests (package)
   (with-package-iterator (next-symbol package :internal :external)
@@ -174,17 +159,15 @@
          (properties
           (loop while (keywordp (first p))
                 unless (cadr p)
-                do (error "Poorly formed deftest: ~A~%"
-                          (list* 'deftest name body))
-                append (list (pop p) (pop p))))
+                  do (error "Poorly formed deftest: ~A~%"
+                            (list* 'deftest name body))
+                append `(,(pop p) ',(pop p))))
          (form (pop p))
          (vals p))
-    `(add-entry (make-entry :pend t
-                            :name ',name
-                            :props ',properties
+    `(add-entry (make-entry :name ',name
                             :form ',form
-                            :vals ',vals))))
-
+                            :vals ',vals
+                            ,@properties))))
 
 (defun report-error (error? &rest args)
   (cond (*debug*
@@ -268,7 +251,7 @@
                        (s *standard-output*))
   (catch '*in-test*
     (setq *test* (entry-name entry))
-    (setf (entry-pend entry) t)
+    (setf (entry-pending entry) t)
     (let* ((*in-test* t)
            ;; (*break-on-warnings* t)
            (aborted nil)
@@ -306,11 +289,11 @@
                       (%do))
                     (%do)))))
 
-      (setf (entry-pend entry)
+      (setf (entry-pending entry)
             (or aborted
                 (not (equalp-with-case r (entry-vals entry)))))
 
-      (when (entry-pend entry)
+      (when (entry-pending entry)
         (let ((*print-circle* *print-circle-on-failure*))
           (format s "~&Test ~:@(~S~) failed~%Form: ~S~%Expected value~P:~%"
                   *test* (entry-form entry) (length (entry-vals entry)))
@@ -323,7 +306,7 @@
                           v (typep v 'condition))))
             (error () (format s "Actual value: #<error during printing>~%")))
           (finish-output s)))))
-  (when (not (entry-pend entry)) *test*))
+  (when (not (entry-pending entry)) *test*))
 
 (defun expanded-eval (form)
   "Split off top level of a form and eval separately.  This reduces the chance that
@@ -391,15 +374,11 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
   (flet ((add-expected-failure (name &aux (item (gethash name *items*)))
            (typecase item
              (note
-              (setf (note-disabled item) t))
+              (setf (note-enabled item) (not (note-enabled item))))
              (entry
               (push name *expected-failures*))
              (t
               (push name *unknown-expected-failures*)))))
-    #|(maphash (lambda (key note)
-               (declare (ignore key))
-               (setf (note-disabled note) nil))
-             *notes*)|#
     (setf *expected-failures* nil)
     (if (or (stringp expected-failures)
             (pathnamep expected-failures))
@@ -431,13 +410,14 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (*unexpected-successes* nil))
     (multiple-value-bind (*entries* *items*)
         (get-entries *package*)
-      (dolist (entry *entries*)
-        (setf (entry-pend entry) t))
       (when expected-failures-p
         (load-expected-failures expected-failures)
         (loop for entry in *entries*
-              when (has-disabled-note entry)
-                do (setf (entry-pend entry) nil)))
+              do (loop for note-name in (entry-notes entry)
+                       unless (note-enabled (gethash note-name *items*))
+                         do (setf (entry-enabled entry) nil))))
+      (dolist (entry *entries*)
+        (setf (entry-pending entry) (entry-enabled entry)))
       (let* ((*default-pathname-defaults* *sandbox-path*)
              (successp (if (streamp out)
                            (do-entries out)
@@ -495,14 +475,14 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                                t))))))
 
 (defun do-entries (s)
-  (let ((count (count t (the list *entries*) :key #'entry-pend)))
+  (let ((count (count t (the list *entries*) :key #'entry-pending)))
     (format s "~&Doing ~A pending test~:P of ~A test~:P total.~%"
             count (length *entries*))
     (finish-output s)
     (when *compile-tests*
       (compile-entries s *entries*))
     (dolist (entry *entries*)
-      (when (entry-pend entry)
+      (when (entry-pending entry)
         (let ((success? (do-entry entry s)))
           (cond (success?
                  (push (entry-name entry) *passed-tests*)
@@ -552,32 +532,10 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
        (error "Name conflict for note ~:@(~S~)" (note-name note)))))
   (setf (get (note-name note) :reserpt) note))
 
-(defmacro defnote (name contents &optional disabled)
+(defmacro defnote (name contents &optional (enabled t))
   `(add-note (make-note :name ',name
                         :contents ',contents
-                        :disabled ',disabled)))
-
-#|(defun disable-note (n &optional (errorp t))
-  (let ((note (if (note-p n) n
-                  (setf n (gethash n *notes*)))))
-    (cond (note
-           (setf (note-disabled note) t)
-           note)
-          (errorp
-           (error "~A is not a note or note name." n))
-          (t
-           nil))))
-
-(defun enable-note (n &optional (errorp t))
-  (let ((note (if (note-p n) n
-                (setf n (gethash n *notes*)))))
-    (cond (note
-           (setf (note-disabled note) nil)
-           note)
-          (errorp
-           (error "~A is not a note or note name." n))
-          (t
-           nil))))|#
+                        :enabled ',enabled)))
 
 ;;; Extended random regression
 
