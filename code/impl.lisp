@@ -102,7 +102,7 @@
 ;;; Note handling functions and macros
 
 (defun add-note (note)
-  (setq note (copy-note note))
+  ;(setq note (copy-note note))
   (let ((previous (get (note-name note) :reserpt)))
     (typecase previous
       (note
@@ -134,7 +134,7 @@
   vals)
 
 (defun add-entry (entry)
-  (setq entry (copy-entry entry))
+  ;(setq entry (copy-entry entry))
   (let ((previous (get (entry-name entry) :reserpt)))
     (typecase previous
       (entry
@@ -197,10 +197,13 @@
            (typecase (setf item (get symbol :reserpt))
              (entry
               (setf item (copy-entry item)
+                    (entry-properties item) (copy-list (entry-properties item))
                     (gethash (entry-name item) items) item
                     entries (merge 'list entries (list (copy-entry item)) #'< :key #'entry-number)))
              (note
-              (setf (gethash (note-name item) items) (copy-note item)))
+              (setf item (copy-note item)
+                    (note-properties item) (copy-list (note-properties item))
+                    (gethash (note-name item) items) item))
              (null)
              (t
               (error "Unknown reserpt object")))
@@ -451,9 +454,9 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (load-expected-failures expected-failures)
         (loop for entry in *entries*
               do (loop for note-name in (entry-notes entry)
-                       do (print (gethash note-name *items*))
-                       unless (note-property (gethash note-name *items*) :enabled t)
-                         do (setf (entry-property entry :enabled t) nil))))
+                       do (loop for (indicator value) on
+                                    (note-properties (gethash note-name *items*)) by #'cddr
+                                do (setf (entry-property entry indicator) value)))))
       (dolist (entry *entries*)
         (setf (entry-pending entry) (entry-property entry :enabled t)))
       (let* ((*default-pathname-defaults* *sandbox-path*)
