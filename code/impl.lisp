@@ -26,15 +26,15 @@
 
 (in-package #:reserpt)
 
-(declaim (ftype (function (t) t) expanded-eval do-entries))
-(declaim (type list *entries*))
+(declaim (ftype (function (t) t) expanded-eval %do-tests))
+(declaim (type list *tests*))
 (declaim (ftype (function (t &rest t) t) report-error))
-(declaim (ftype (function (t &optional t) t) do-entry))
+(declaim (ftype (function (t &optional t) t) %do-test))
 
 (defvar *test-number* 0)
 (defvar *test* nil "Current test name")
 (defvar *do-tests-when-defined* nil)
-(defvar *entries* nil
+(defvar *tests* nil
   "Test database.")
 (defvar *items* nil
   "Note database")
@@ -122,7 +122,7 @@
                           :documentation ',documentation
                           :properties ',properties))))
 
-(defstruct entry
+(defstruct test
   name
   documentation
   properties
@@ -130,44 +130,44 @@
   pending
   notes
   form
-  test-function
+  function
   vals)
 
-(defun add-entry (entry)
-  ;(setq entry (copy-entry entry))
-  (let ((previous (get (entry-name entry) :reserpt)))
+(defun add-test (test)
+  ;(setq test (copy-test test))
+  (let ((previous (get (test-name test) :reserpt)))
     (typecase previous
-      (entry
-       (warn "Redefining entry ~:@(~S~)" (entry-name entry)))
+      (test
+       (warn "Redefining test ~:@(~S~)" (test-name test)))
       (null)
       (t
-       (error "Name conflict for entry ~:@(~S~)" (entry-name entry)))))
-  (setf (get (entry-name entry) :reserpt) entry)
+       (error "Name conflict for test ~:@(~S~)" (test-name test)))))
+  (setf (get (test-name test) :reserpt) test)
   (when *do-tests-when-defined*
-    (do-entry entry))
-  (setq *test* (entry-name entry)))
+    (%do-test test))
+  (setq *test* (test-name test)))
 
 (defmacro deftest (name &rest body)
   (multiple-value-bind (documentation properties initials rest)
       (parse-properties body :notes)
-    `(add-entry (make-entry :name ',name
+    `(add-test (make-test :name ',name
                             :documentation ',documentation
                             :properties ',properties
                             :form ',(pop rest)
                             :vals ',rest
                             ,@initials))))
 
-(defun has-note (entry note)
+(defun has-note (test note)
   (unless (note-p note)
     (let ((new-note (get note :reserpt)))
       (setf note new-note)))
-  (and note (not (not (member note (entry-notes entry))))))
+  (and note (not (not (member note (test-notes test))))))
 
-(defun entry-property (entry indicator &optional default-value)
-  (getf (entry-properties entry) indicator default-value))
+(defun test-property (test indicator &optional default-value)
+  (getf (test-properties test) indicator default-value))
 
-(defun (setf entry-property) (new-value entry indicator &optional default-value)
-  (setf (getf (entry-properties entry) indicator default-value) new-value))
+(defun (setf test-property) (new-value test indicator &optional default-value)
+  (setf (getf (test-properties test) indicator default-value) new-value))
 
 #|(defun rem-all-tests (package)
   (with-package-iterator (next-symbol package :internal :external)
@@ -183,11 +183,11 @@
   (remprop name :reserpt))
 |#
 #|(defun get-test (&optional (name *test*))
-  (defn (get-entry name)))|#
+  (defn (get-test name)))|#
 
-(defun get-entries (package)
+(defun get-tests (package)
   (with-package-iterator (next-symbol package :internal :external)
-    (prog ((entries nil)
+    (prog ((tests nil)
            (items (make-hash-table :test #'eq))
            (item nil))
      next
@@ -195,11 +195,11 @@
            (next-symbol)
          (when presentp
            (typecase (setf item (get symbol :reserpt))
-             (entry
-              (setf item (copy-entry item)
-                    (entry-properties item) (copy-list (entry-properties item))
-                    (gethash (entry-name item) items) item
-                    entries (merge 'list entries (list (copy-entry item)) #'< :key #'entry-number)))
+             (test
+              (setf item (copy-test item)
+                    (test-properties item) (copy-list (test-properties item))
+                    (gethash (test-name item) items) item
+                    tests (merge 'list tests (list (copy-test item)) #'< :key #'test-number)))
              (note
               (setf item (copy-note item)
                     (note-properties item) (copy-list (note-properties item))
@@ -208,7 +208,7 @@
              (t
               (error "Unknown reserpt object")))
            (go next)))
-       (return (values entries items)))))
+       (return (values tests items)))))
 
 (defun report-error (error? &rest args)
   (cond (*debug*
@@ -221,9 +221,9 @@
 (defun do-test (name
                 &key ((:catch-errors *catch-errors*) *catch-errors*)
                      ((:compile *compile-tests*) *compile-tests*)
-                &aux (entry (get name :reserpt)))
-  (if (entry-p entry)
-      (do-entry entry)
+                &aux (test (get name :reserpt)))
+  (if (test-p test)
+      (%do-test test)
       (error "~%No test with name ~:@(~S~)." name)))
 
 (defun my-aref (a &rest args)
@@ -280,19 +280,19 @@
           (compile nil lambda-expr)))
       (compile nil lambda-expr)))
 
-(defun compile-test-function (entry)
-  (or (entry-test-function entry)
-      (setf (entry-test-function entry)
+(defun compile-test-function (test)
+  (or (test-function test)
+      (setf (test-function test)
             (compile* `(lambda ()
                          (declare (optimize ,@*optimization-settings*))
-                         ,(entry-form entry))
-                      (entry-property entry :muffle-warnings t)))))
+                         ,(test-form test))
+                      (test-property test :muffle-warnings t)))))
 
-(defun do-entry (entry &optional
+(defun %do-test (test &optional
                        (s *standard-output*))
   (catch '*in-test*
-    (setq *test* (entry-name entry))
-    (setf (entry-pending entry) t)
+    (setq *test* (test-name test))
+    (setf (test-pending test) t)
     (let* ((*in-test* t)
            ;; (*break-on-warnings* t)
            (aborted nil)
@@ -305,21 +305,21 @@
                           (handler-bind
                            #-sbcl nil
                            #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
-                                                                  (when (entry-property entry :muffle-warnings t)
+                                                                  (when (test-property test :muffle-warnings t)
                                                                     (muffle-warning c)))))
                            (cond
                             (*compile-tests*
                              (multiple-value-list
-                              (funcall (compile-test-function entry))))
+                              (funcall (compile-test-function test))))
                             (*expanded-eval*
                              (multiple-value-list
-                              (expanded-eval (entry-form entry))))
+                              (expanded-eval (test-form test))))
                             (t
                              (multiple-value-list
-                              (eval (entry-form entry))))))))
+                              (eval (test-form test))))))))
                 (if *catch-errors*
                     (handler-bind
-                     ((style-warning #'(lambda (c) (if (entry-property entry :muffle-warnings t)
+                     ((style-warning #'(lambda (c) (if (test-property test :muffle-warnings t)
                                                        (muffle-warning c)
                                                        c)))
                       (error #'(lambda (c)
@@ -329,15 +329,15 @@
                       (%do))
                     (%do)))))
 
-      (setf (entry-pending entry)
+      (setf (test-pending test)
             (or aborted
-                (not (equalp-with-case r (entry-vals entry)))))
+                (not (equalp-with-case r (test-vals test)))))
 
-      (when (entry-pending entry)
+      (when (test-pending test)
         (let ((*print-circle* *print-circle-on-failure*))
           (format s "~&Test ~:@(~S~) failed~%Form: ~S~%Expected value~P:~%"
-                  *test* (entry-form entry) (length (entry-vals entry)))
-          (dolist (v (entry-vals entry)) (format s "~10t~S~%" v))
+                  *test* (test-form test) (length (test-vals test)))
+          (dolist (v (test-vals test)) (format s "~10t~S~%" v))
           (handler-case
               (progn
                 (format s "Actual value~P:~%" (length r))
@@ -346,7 +346,7 @@
                           v (typep v 'condition))))
             (error () (format s "Actual value: #<error during printing>~%")))
           (finish-output s)))))
-  (when (not (entry-pending entry)) *test*))
+  (when (not (test-pending test)) *test*))
 
 (defun expanded-eval (form)
   "Split off top level of a form and eval separately.  This reduces the chance that
@@ -387,7 +387,7 @@
 (defun continue-testing ()
   (if *in-test*
       (throw '*in-test* nil)
-      (do-entries *standard-output*)))
+      (%do-tests *standard-output*)))
 
 (defun exit (successp &aux (code (if successp 0 1)))
   #+abcl (ext:quit :status code)
@@ -415,7 +415,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
            (typecase item
              (note
               (setf (note-property item :enabled) (not (note-property item :enabled t))))
-             (entry
+             (test
               (push name *expected-failures*))
              (t
               (push name *unknown-expected-failures*)))))
@@ -448,56 +448,56 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (*passed-tests* nil)
         (*unexpected-failures* nil)
         (*unexpected-successes* nil))
-    (multiple-value-bind (*entries* *items*)
-        (get-entries *package*)
+    (multiple-value-bind (*tests* *items*)
+        (get-tests *package*)
       (when expected-failures-p
         (load-expected-failures expected-failures)
-        (loop for entry in *entries*
-              do (loop for note-name in (entry-notes entry)
+        (loop for test in *tests*
+              do (loop for note-name in (test-notes test)
                        do (loop for (indicator value) on
                                     (note-properties (gethash note-name *items*)) by #'cddr
-                                do (setf (entry-property entry indicator) value)))))
-      (dolist (entry *entries*)
-        (setf (entry-pending entry) (entry-property entry :enabled t)))
+                                do (setf (test-property test indicator) value)))))
+      (dolist (test *tests*)
+        (setf (test-pending test) (test-property test :enabled t)))
       (let* ((*default-pathname-defaults* *sandbox-path*)
              (successp (if (streamp out)
-                           (do-entries out)
+                           (%do-tests out)
                            (with-open-file
                                (stream out :direction :output)
-                             (do-entries stream)))))
+                             (%do-tests stream)))))
         (when exit
           (exit successp))
         successp))))
 
-(defun compile-entries
-    (stream entries
-     &optional (number-of-entries (length entries))
-               (batch-size (min number-of-entries *compile-batch-size*))
+(defun compile-tests
+    (stream tests
+     &optional (number-of-tests (length tests))
+               (batch-size (min number-of-tests *compile-batch-size*))
                silent)
   "Compile all test functions in batches"
-  (do ((remaining-entries entries (nthcdr batch-size remaining-entries))
-       (remaining-number-of-entries number-of-entries (- remaining-number-of-entries batch-size))
+  (do ((remaining-tests tests (nthcdr batch-size remaining-tests))
+       (remaining-number-of-tests number-of-tests (- remaining-number-of-tests batch-size))
        (body nil nil))
-      ((or (null remaining-entries) (<= remaining-number-of-entries 0)))
+      ((or (null remaining-tests) (<= remaining-number-of-tests 0)))
     (unless (or silent
-                (let ((processed-number-of-entries
-                       (- number-of-entries remaining-number-of-entries)))
-                  ;; only output the message every 1024 entries
-                  (= (ceiling processed-number-of-entries 1024)
-                     (ceiling (+ processed-number-of-entries batch-size)
+                (let ((processed-number-of-tests
+                       (- number-of-tests remaining-number-of-tests)))
+                  ;; only output the message every 1024 tests
+                  (= (ceiling processed-number-of-tests 1024)
+                     (ceiling (+ processed-number-of-tests batch-size)
                               1024))))
       (format stream "~&~A of ~A tests remaining to be compiled.~%"
-              remaining-number-of-entries number-of-entries))
+              remaining-number-of-tests number-of-tests))
     (do ((n 0 (1+ n))
-         (current-entries remaining-entries (rest current-entries)))
-        ((or (null current-entries) (>= n batch-size)
-             (>= n remaining-number-of-entries)))
-      (let ((entry (first current-entries)))
-        (when (entry-property entry :muffle-warnings t)
-          (push `(setf (entry-test-function ,entry)
+         (current-tests remaining-tests (rest current-tests)))
+        ((or (null current-tests) (>= n batch-size)
+             (>= n remaining-number-of-tests)))
+      (let ((test (first current-tests)))
+        (when (test-property test :muffle-warnings t)
+          (push `(setf (test-function ,test)
                        (lambda ()
                          (declare (optimize ,@*optimization-settings*))
-                         ,(entry-form entry)))
+                         ,(test-form test)))
                 body))))
     (multiple-value-bind (function warnings-p failure-p)
         (handler-case
@@ -508,31 +508,31 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
       (if (not failure-p)
           (funcall function)
           (if (= batch-size 1)
-              (format stream "~&Cannot compile test function for entry ~A.~%"
-                      (entry-name (first remaining-entries)))
+              (format stream "~&Cannot compile test function for test ~A.~%"
+                      (test-name (first remaining-tests)))
               ;; Something went wrong, try to narrow down where
-              (compile-entries stream remaining-entries
+              (compile-tests stream remaining-tests
                                batch-size (floor batch-size 2)
                                t))))))
 
-(defun do-entries (s)
-  (let ((count (count t (the list *entries*) :key #'entry-pending)))
+(defun %do-tests (s)
+  (let ((count (count t (the list *tests*) :key #'test-pending)))
     (format s "~&Doing ~A pending test~:P of ~A test~:P total.~%"
-            count (length *entries*))
+            count (length *tests*))
     (finish-output s)
     (when *compile-tests*
-      (compile-entries s *entries*))
-    (dolist (entry *entries*)
-      (when (entry-pending entry)
-        (let ((success? (do-entry entry s)))
+      (compile-tests s *tests*))
+    (dolist (test *tests*)
+      (when (test-pending test)
+        (let ((success? (%do-test test s)))
           (cond (success?
-                 (push (entry-name entry) *passed-tests*)
-                 (when (member (entry-name entry) *expected-failures*)
-                   (push (entry-name entry) *unexpected-successes*)))
+                 (push (test-name test) *passed-tests*)
+                 (when (member (test-name test) *expected-failures*)
+                   (push (test-name test) *unexpected-successes*)))
                 (t
-                 (push (entry-name entry) *failed-tests*)
-                 (unless (member (entry-name entry) *expected-failures*)
-                   (push (entry-name entry) *unexpected-failures*))))
+                 (push (test-name test) *failed-tests*)
+                 (unless (member (test-name test) *expected-failures*)
+                   (push (test-name test) *unexpected-failures*))))
           (format s "~@[~<~%~:; ~:@(~S~)~>~]" success?))
         (finish-output s)))
     (setq *passed-tests* (nreverse *passed-tests*)
@@ -569,7 +569,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
   "Execute randomly chosen tests from TESTS until one fails or until
    COUNT is an integer and that many tests have been executed."
   (let* ((*package* (find-package package))
-         (*entries* (get-entries *package*))
+         (*tests* (get-tests *package*))
          (*default-pathname-defaults* (make-pathname :directory (append (pathname-directory (or *compile-file-pathname*
                                                                                                 *load-pathname*
                                                                                                 *default-pathname-defaults*))
