@@ -67,17 +67,6 @@
 (defvar *unexpected-failures* nil
   "A list of tests that failed but were not expected to fail.")
 
-(defstruct entry
-  (number (incf *test-number*))
-  pending
-  name
-  notes
-  props
-  form
-  test-function
-  vals
-  (enabled t))
-
 ;;; Note objects are used to attach information to tests.
 ;;; A typical use is to mark tests that depend on a particular
 ;;; part of a set of requirements, or a particular interpretation
@@ -85,16 +74,88 @@
 
 (defstruct note
   name
-  contents
-  (enabled t))
+  documentation
+  properties)
 
-;; (defmacro vals (entry) `(cdddr ,entry))
+(defun note-property (note indicator &optional default-value)
+  (getf (note-properties note) indicator default-value))
 
-#|(defmacro defn (entry)
-  (let ((var (gensym)))
-    `(let ((,var ,entry))
-       (list* (entry-name ,var) (entry-form ,var) (entry-vals ,var)))))
-|#
+(defun (setf note-property) (new-value note indicator &optional default-value)
+  (setf (getf (note-properties note) indicator default-value) new-value))
+
+(defun parse-properties (body &rest indicators)
+  (prog (documentation properties initials)
+     (when (stringp (car body))
+       (setf documentation (pop body)))
+   next
+     (unless (cdr body)
+       (go end))
+     (when (member (car body) indicators)
+       (setf (getf initials (pop body)) `',(pop body))
+       (go next))
+     (when (keywordp (car body))
+       (setf (getf properties (pop body)) (pop body))
+       (go next))
+   end
+     (return (values documentation properties initials body))))
+
+;;; Note handling functions and macros
+
+(defun add-note (note)
+  (setq note (copy-note note))
+  (let ((previous (get (note-name note) :reserpt)))
+    (typecase previous
+      (note
+       (warn "Redefining note ~:@(~S~)" (note-name note)))
+      (null)
+      (t
+       (error "Name conflict for note ~:@(~S~)" (note-name note)))))
+  (setf (get (note-name note) :reserpt) note))
+
+(defmacro defnote (name &rest body)
+  (multiple-value-bind (documentation properties initials rest)
+      (parse-properties body)
+    (declare (ignore initials))
+    (when rest
+      (error "Non-empty body in note"))
+    `(add-note (make-note :name ',name
+                          :documentation ',documentation
+                          :properties ',properties))))
+
+(defstruct entry
+  name
+  documentation
+  properties
+  (number (incf *test-number*))
+  pending
+  notes
+  form
+  test-function
+  vals)
+
+(defun add-entry (entry)
+  (setq entry (copy-entry entry))
+  (let ((previous (get (entry-name entry) :reserpt)))
+    (typecase previous
+      (entry
+       (warn "Redefining entry ~:@(~S~)" (entry-name entry)))
+      (null)
+      (t
+       (error "Name conflict for entry ~:@(~S~)" (entry-name entry)))))
+  (setf (get (entry-name entry) :reserpt) entry)
+  (when *do-tests-when-defined*
+    (do-entry entry))
+  (setq *test* (entry-name entry)))
+
+(defmacro deftest (name &rest body)
+  (multiple-value-bind (documentation properties initials rest)
+      (parse-properties body :notes)
+    `(add-entry (make-entry :name ',name
+                            :documentation ',documentation
+                            :properties ',properties
+                            :form ',(pop rest)
+                            :vals ',rest
+                            ,@initials))))
 
 (defun has-note (entry note)
   (unless (note-p note)
@@ -102,7 +163,13 @@
       (setf note new-note)))
   (and note (not (not (member note (entry-notes entry))))))
 
-(defun rem-all-tests (package)
+(defun entry-property (entry indicator &optional default-value)
+  (getf (entry-properties entry) indicator default-value))
+
+(defun (setf entry-property) (new-value entry indicator &optional default-value)
+  (setf (getf (entry-properties entry) indicator default-value) new-value))
+
+#|(defun rem-all-tests (package)
   (with-package-iterator (next-symbol package :internal :external)
     (tagbody
      next
@@ -114,7 +181,7 @@
 
 (defun rem-test (&optional (name *test*))
   (remprop name :reserpt))
-
+|#
 #|(defun get-test (&optional (name *test*))
   (defn (get-entry name)))|#
 
@@ -139,35 +206,6 @@
               (error "Unknown reserpt object")))
            (go next)))
        (return (values entries items)))))
-
-(defun add-entry (entry)
-  (setq entry (copy-entry entry))
-  (let ((previous (get (entry-name entry) :reserpt)))
-    (typecase previous
-      (entry
-       (warn "Redefining entry ~:@(~S~)" (entry-name entry)))
-      (null)
-      (t
-       (error "Name conflict for entry ~:@(~S~)" (entry-name entry)))))
-  (setf (get (entry-name entry) :reserpt) entry)
-  (when *do-tests-when-defined*
-    (do-entry entry))
-  (setq *test* (entry-name entry)))
-
-(defmacro deftest (name &rest body)
-  (let* ((p body)
-         (properties
-          (loop while (keywordp (first p))
-                unless (cadr p)
-                  do (error "Poorly formed deftest: ~A~%"
-                            (list* 'deftest name body))
-                append `(,(pop p) ',(pop p))))
-         (form (pop p))
-         (vals p))
-    `(add-entry (make-entry :name ',name
-                            :form ',form
-                            :vals ',vals
-                            ,@properties))))
 
 (defun report-error (error? &rest args)
   (cond (*debug*
@@ -229,15 +267,15 @@
     (equal x y))
    (t (eql x y))))
 
-(defun compile* (lambda-expr &optional do-not-muffle-warnings)
-  (if do-not-muffle-warnings
-      (compile nil lambda-expr)
+(defun compile* (lambda-expr &optional muffle-warnings)
+  (if muffle-warnings
       (handler-bind
           ((style-warning #'(lambda (c) (muffle-warning c))))
         ;; redirecting *error-output* is the best way to get rid of
         ;; annoying output from the compiler
         (let ((*error-output* (make-broadcast-stream)))
-          (compile nil lambda-expr)))))
+          (compile nil lambda-expr)))
+      (compile nil lambda-expr)))
 
 (defun compile-test-function (entry)
   (or (entry-test-function entry)
@@ -245,7 +283,7 @@
             (compile* `(lambda ()
                          (declare (optimize ,@*optimization-settings*))
                          ,(entry-form entry))
-                      (has-note entry :do-not-muffle-warnings)))))
+                      (entry-property entry :muffle-warnings t)))))
 
 (defun do-entry (entry &optional
                        (s *standard-output*))
@@ -264,8 +302,7 @@
                           (handler-bind
                            #-sbcl nil
                            #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
-                                                                  (if (has-note entry :do-not-muffle)
-                                                                      nil
+                                                                  (when (entry-property entry :muffle-warnings t)
                                                                     (muffle-warning c)))))
                            (cond
                             (*compile-tests*
@@ -279,9 +316,9 @@
                               (eval (entry-form entry))))))))
                 (if *catch-errors*
                     (handler-bind
-                     ((style-warning #'(lambda (c) (if (has-note entry :do-not-muffle-warnings)
-                                                       c
-                                                       (muffle-warning c))))
+                     ((style-warning #'(lambda (c) (if (entry-property entry :muffle-warnings t)
+                                                       (muffle-warning c)
+                                                       c)))
                       (error #'(lambda (c)
                                  (setf aborted t)
                                  (setf r (list c))
@@ -374,7 +411,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
   (flet ((add-expected-failure (name &aux (item (gethash name *items*)))
            (typecase item
              (note
-              (setf (note-enabled item) (not (note-enabled item))))
+              (setf (note-property item :enabled) (not (note-property item :enabled t))))
              (entry
               (push name *expected-failures*))
              (t
@@ -414,10 +451,11 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (load-expected-failures expected-failures)
         (loop for entry in *entries*
               do (loop for note-name in (entry-notes entry)
-                       unless (note-enabled (gethash note-name *items*))
-                         do (setf (entry-enabled entry) nil))))
+                       do (print (gethash note-name *items*))
+                       unless (note-property (gethash note-name *items*) :enabled t)
+                         do (setf (entry-property entry :enabled t) nil))))
       (dolist (entry *entries*)
-        (setf (entry-pending entry) (entry-enabled entry)))
+        (setf (entry-pending entry) (entry-property entry :enabled t)))
       (let* ((*default-pathname-defaults* *sandbox-path*)
              (successp (if (streamp out)
                            (do-entries out)
@@ -452,7 +490,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         ((or (null current-entries) (>= n batch-size)
              (>= n remaining-number-of-entries)))
       (let ((entry (first current-entries)))
-        (unless (has-note entry :do-not-muffle-warnings)
+        (when (entry-property entry :muffle-warnings t)
           (push `(setf (entry-test-function ,entry)
                        (lambda ()
                          (declare (optimize ,@*optimization-settings*))
@@ -518,24 +556,6 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
             *failed-tests*
             *unexpected-failures*
             *unexpected-successes*)))
-
-;;; Note handling functions and macros
-
-(defun add-note (note)
-  (setq note (copy-note note))
-  (let ((previous (get (note-name note) :reserpt)))
-    (typecase previous
-      (note
-       (warn "Redefining note ~:@(~S~)" (note-name note)))
-      (null)
-      (t
-       (error "Name conflict for note ~:@(~S~)" (note-name note)))))
-  (setf (get (note-name note) :reserpt) note))
-
-(defmacro defnote (name contents &optional (enabled t))
-  `(add-note (make-note :name ',name
-                        :contents ',contents
-                        :enabled ',enabled)))
 
 ;;; Extended random regression
 
