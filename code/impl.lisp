@@ -29,9 +29,6 @@
 (defvar *failed-tests* nil "After DO-TESTS, becomes the list of names of tests that have failed")
 (defvar *passed-tests* nil "After DO-TESTS, becomes the list of names of tests that have passed")
 
-(defvar *expected-failures* nil
-  "A list of test names that are expected to fail.")
-
 (defvar *unknown-expected-failures* nil
   "A list of test names that are expected to fail but are not valid names.")
 
@@ -76,7 +73,6 @@
 ;;; Note handling functions and macros
 
 (defun add-note (note)
-                                        ;(setq note (copy-note note))
   (let ((previous (get (note-name note) :reserpt)))
     (typecase previous
       (note
@@ -108,7 +104,6 @@
   vals)
 
 (defun add-test (test)
-                                        ;(setq test (copy-test test))
   (let ((previous (get (test-name test) :reserpt)))
     (typecase previous
       (test
@@ -140,22 +135,6 @@
 
 (defun (setf test-property) (new-value test indicator &optional default-value)
   (setf (getf (test-properties test) indicator default-value) new-value))
-
-#|(defun rem-all-tests (package)
-(with-package-iterator (next-symbol package :internal :external)
-(tagbody
-next
-(multiple-value-bind (presentp symbol)
-(next-symbol)
-(when presentp
-(remprop symbol :reserpt)
-(go next))))))
-
-(defun rem-test (&optional (name *test*))
-(remprop name :reserpt))
-|#
-#|(defun get-test (&optional (name *test*))
-(defn (get-test name)))|#
 
 (defun get-tests (package)
   (with-package-iterator (next-symbol package :internal :external)
@@ -380,7 +359,7 @@ next
   #+lispworks (lispworks:quit :status code :ignore-errors-p t)
   #+sbcl (sb-ext:exit :code code))
 
-(defun load-expected-failures (expected-failures &key (if-does-not-exist :error))
+(defun load-expected-failures (expected-failures skip-failing-tests skip-failing-notes)
   "Initialize *expected-failures* and disabled notes from expected-failures.
 If expected-failures is a list then just iterate through the list. If the
 item is a keyword then disable the note by that name. Otherwise add the test
@@ -390,26 +369,25 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
   (flet ((add-expected-failure (name &aux (item (gethash name *items*)))
            (typecase item
              (note
-              (setf (note-property item :enabled) (not (note-property item :enabled t))))
+              (if skip-failing-notes
+                  (setf (note-property item :skip) t)
+                  (setf (note-property item :expected-failure) t)))
              (test
-              (push name *expected-failures*))
+              (if skip-failing-tests
+                  (setf (test-property item :skip) t)
+                  (setf (test-property item :expected-failure) t)))
              (t
               (push name *unknown-expected-failures*)))))
-    (setf *expected-failures* nil)
     (if (or (stringp expected-failures)
             (pathnamep expected-failures))
-        (with-open-file (stream expected-failures :if-does-not-exist if-does-not-exist)
-          (cond (stream
-                 (format t "Loading expected failures from ~s~%" expected-failures)
-                 (do ((name (read stream nil stream) (read stream nil stream)))
-                     ((eq name stream))
-                   (add-expected-failure name)))
-                (t
-                 (format t "Expected failures file ~s not found~%" expected-failures))))
+        (with-open-file (stream expected-failures :if-does-not-exist :error)
+          (format t "Loading expected failures from ~s~%" expected-failures)
+          (do ((name (read stream nil stream) (read stream nil stream)))
+              ((eq name stream))
+            (add-expected-failure name)))
         (dolist (name expected-failures)
           (add-expected-failure name))))
-  (setq *unknown-expected-failures* (nreverse *unknown-expected-failures*)
-        *expected-failures* (nreverse *expected-failures*)))
+  (setq *unknown-expected-failures* (nreverse *unknown-expected-failures*)))
 
 (defparameter *sandbox-path* (ignore-errors (truename #P"sandbox/")))
 
@@ -418,6 +396,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                       ((:catch-errors *catch-errors*) *catch-errors*)
                       ((:compile *compile-tests*) *compile-tests*)
                       (expected-failures nil expected-failures-p)
+                      skip-failing-tests (skip-failing-notes t)
                       exit)
   (let ((*package* (find-package package))
         (*failed-tests* nil)
@@ -427,14 +406,14 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
     (multiple-value-bind (*tests* *items*)
         (get-tests *package*)
       (when expected-failures-p
-        (load-expected-failures expected-failures)
+        (load-expected-failures expected-failures skip-failing-tests skip-failing-notes)
         (loop for test in *tests*
               do (loop for note-name in (test-notes test)
                        do (loop for (indicator value) on
                                     (note-properties (gethash note-name *items*)) by #'cddr
                                 do (setf (test-property test indicator) value)))))
       (dolist (test *tests*)
-        (setf (test-pending test) (test-property test :enabled t)))
+        (setf (test-pending test) (not (test-property test :skip))))
       (let* ((*default-pathname-defaults* *sandbox-path*)
              (successp (if (streamp out)
                            (%do-tests out)
@@ -513,11 +492,11 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (let ((success? (%do-test test s)))
           (cond (success?
                  (push (test-name test) *passed-tests*)
-                 (when (member (test-name test) *expected-failures*)
+                 (when (test-property test :expected-failure)
                    (push (test-name test) *unexpected-successes*)))
                 (t
                  (push (test-name test) *failed-tests*)
-                 (unless (member (test-name test) *expected-failures*)
+                 (unless (test-property test :expected-failure)
                    (push (test-name test) *unexpected-failures*))))
           (format s "~@[~<~%~:; ~:@(~S~)~>~]" success?))
         (finish-output s)))
