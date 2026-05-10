@@ -1,29 +1,3 @@
-;-*-syntax:COMMON-LISP;Package:(RT :use "COMMON-LISP" :colon-mode :external)-*-
-
-#|----------------------------------------------------------------------------|
- | Copyright 1990 by the Massachusetts Institute of Technology, Cambridge MA. |
- |                                                                            |
- | Permission  to  use,  copy, modify, and distribute this software  and  its |
- | documentation for any purpose  and without fee is hereby granted, provided |
- | that this copyright  and  permission  notice  appear  in  all  copies  and |
- | supporting  documentation,  and  that  the  name  of M.I.T. not be used in |
- | advertising or  publicity  pertaining  to  distribution  of  the  software |
- | without   specific,   written   prior   permission.      M.I.T.  makes  no |
- | representations  about  the  suitability of this software for any purpose. |
- | It is provided "as is" without express or implied warranty.                |
- |                                                                            |
- |  M.I.T. DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,  INCLUDING  |
- |  ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT SHALL  |
- |  M.I.T. BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL  DAMAGES  OR  |
- |  ANY  DAMAGES  WHATSOEVER  RESULTING  FROM  LOSS OF USE, DATA OR PROFITS,  |
- |  WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER  TORTIOUS  ACTION,  |
- |  ARISING  OUT  OF  OR  IN  CONNECTION WITH THE USE OR PERFORMANCE OF THIS  |
- |  SOFTWARE.                                                                 |
- |----------------------------------------------------------------------------|#
-
-;This was the December 19, 1990 version of the regression tester, but
-;has since been modified.
-
 (in-package #:reserpt)
 
 (declaim (ftype (function (t) t) expanded-eval %do-tests))
@@ -33,7 +7,6 @@
 
 (defvar *test-number* 0)
 (defvar *test* nil "Current test name")
-(defvar *do-tests-when-defined* nil)
 (defvar *tests* nil
   "Test database.")
 (defvar *items* nil
@@ -46,11 +19,12 @@
 
 (defvar *compile-tests* nil "When true, compile the tests before running them.")
 (defvar *expanded-eval* nil "When true, convert the tests into a form that is less likely to have compiler optimizations.")
-(defvar *optimization-settings* '((safety 3)))
+(defvar *compile-declarations* '((optimize (safety 3))))
 (defvar *compile-batch-size*
   #+ecl 512
   #-ecl 16
   "Number of tests to compile at the same time.")
+
 
 (defvar *failed-tests* nil "After DO-TESTS, becomes the list of names of tests that have failed")
 (defvar *passed-tests* nil "After DO-TESTS, becomes the list of names of tests that have passed")
@@ -102,7 +76,7 @@
 ;;; Note handling functions and macros
 
 (defun add-note (note)
-  ;(setq note (copy-note note))
+                                        ;(setq note (copy-note note))
   (let ((previous (get (note-name note) :reserpt)))
     (typecase previous
       (note
@@ -130,11 +104,11 @@
   pending
   notes
   form
-  function
+  compiled-form
   vals)
 
 (defun add-test (test)
-  ;(setq test (copy-test test))
+                                        ;(setq test (copy-test test))
   (let ((previous (get (test-name test) :reserpt)))
     (typecase previous
       (test
@@ -143,19 +117,17 @@
       (t
        (error "Name conflict for test ~:@(~S~)" (test-name test)))))
   (setf (get (test-name test) :reserpt) test)
-  (when *do-tests-when-defined*
-    (%do-test test))
   (setq *test* (test-name test)))
 
 (defmacro deftest (name &rest body)
   (multiple-value-bind (documentation properties initials rest)
       (parse-properties body :notes)
     `(add-test (make-test :name ',name
-                            :documentation ',documentation
-                            :properties ',properties
-                            :form ',(pop rest)
-                            :vals ',rest
-                            ,@initials))))
+                          :documentation ',documentation
+                          :properties ',properties
+                          :form ',(pop rest)
+                          :vals ',rest
+                          ,@initials))))
 
 (defun has-note (test note)
   (unless (note-p note)
@@ -170,20 +142,20 @@
   (setf (getf (test-properties test) indicator default-value) new-value))
 
 #|(defun rem-all-tests (package)
-  (with-package-iterator (next-symbol package :internal :external)
-    (tagbody
-     next
-       (multiple-value-bind (presentp symbol)
-           (next-symbol)
-         (when presentp
-           (remprop symbol :reserpt)
-           (go next))))))
+(with-package-iterator (next-symbol package :internal :external)
+(tagbody
+next
+(multiple-value-bind (presentp symbol)
+(next-symbol)
+(when presentp
+(remprop symbol :reserpt)
+(go next))))))
 
 (defun rem-test (&optional (name *test*))
-  (remprop name :reserpt))
+(remprop name :reserpt))
 |#
 #|(defun get-test (&optional (name *test*))
-  (defn (get-test name)))|#
+(defn (get-test name)))|#
 
 (defun get-tests (package)
   (with-package-iterator (next-symbol package :internal :external)
@@ -236,39 +208,39 @@
   "Like EQUALP, but doesn't do case conversion of characters.
    Currently doesn't work on arrays of dimension > 2."
   (cond
-   ((eq x y) t)
-   ((consp x)
-    (and (consp y)
-         (equalp-with-case (car x) (car y))
-         (equalp-with-case (cdr x) (cdr y))))
-   ((and (typep x 'array)
-         (= (array-rank x) 0))
-    (equalp-with-case (my-aref x) (my-aref y)))
-   ((typep x 'vector)
-    (and (typep y 'vector)
-         (let ((x-len (length x))
-               (y-len (length y)))
-           (and (eql x-len y-len)
-                (loop
-                 for i from 0 below x-len
-                 for e1 = (my-aref x i)
-                 for e2 = (my-aref y i)
-                 always (equalp-with-case e1 e2))))))
-   ((and (typep x 'array)
-         (typep y 'array)
-         (not (equal (array-dimensions x)
-                     (array-dimensions y))))
-    nil)
+    ((eq x y) t)
+    ((consp x)
+     (and (consp y)
+          (equalp-with-case (car x) (car y))
+          (equalp-with-case (cdr x) (cdr y))))
+    ((and (typep x 'array)
+          (= (array-rank x) 0))
+     (equalp-with-case (my-aref x) (my-aref y)))
+    ((typep x 'vector)
+     (and (typep y 'vector)
+          (let ((x-len (length x))
+                (y-len (length y)))
+            (and (eql x-len y-len)
+                 (loop
+                   for i from 0 below x-len
+                   for e1 = (my-aref x i)
+                   for e2 = (my-aref y i)
+                   always (equalp-with-case e1 e2))))))
+    ((and (typep x 'array)
+          (typep y 'array)
+          (not (equal (array-dimensions x)
+                      (array-dimensions y))))
+     nil)
 
-   ((typep x 'array)
-    (and (typep y 'array)
-         (let ((size (array-total-size x)))
-           (loop for i from 0 below size
-                 always (equalp-with-case (my-row-major-aref x i)
-                                          (my-row-major-aref y i))))))
-   ((typep x 'pathname)
-    (equal x y))
-   (t (eql x y))))
+    ((typep x 'array)
+     (and (typep y 'array)
+          (let ((size (array-total-size x)))
+            (loop for i from 0 below size
+                  always (equalp-with-case (my-row-major-aref x i)
+                                           (my-row-major-aref y i))))))
+    ((typep x 'pathname)
+     (equal x y))
+    (t (eql x y))))
 
 (defun compile* (lambda-expr &optional muffle-warnings)
   (if muffle-warnings
@@ -280,16 +252,20 @@
           (compile nil lambda-expr)))
       (compile nil lambda-expr)))
 
-(defun compile-test-function (test)
-  (or (test-function test)
-      (setf (test-function test)
-            (compile* `(lambda ()
-                         (declare (optimize ,@*optimization-settings*))
-                         ,(test-form test))
+(defun test-thunk (test)
+  (let ((declarations (test-property test :declarations *compile-declarations*)))
+    `(lambda ()
+       ,@(when declarations
+           `((declare ,@declarations)))
+       ,(test-form test))))
+
+(defun compile-test (test)
+  (or (test-compiled-form test)
+      (setf (test-compiled-form test)
+            (compile* (test-thunk test)
                       (test-property test :muffle-warnings t)))))
 
-(defun %do-test (test &optional
-                       (s *standard-output*))
+(defun %do-test (test &optional (s *standard-output*))
   (catch '*in-test*
     (setq *test* (test-name test))
     (setf (test-pending test) t)
@@ -302,30 +278,30 @@
       (block aborted
         (setf r
               (flet ((%do ()
-                          (handler-bind
+                       (handler-bind
                            #-sbcl nil
-                           #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
-                                                                  (when (test-property test :muffle-warnings t)
-                                                                    (muffle-warning c)))))
-                           (cond
-                            (*compile-tests*
-                             (multiple-value-list
-                              (funcall (compile-test-function test))))
-                            (*expanded-eval*
-                             (multiple-value-list
-                              (expanded-eval (test-form test))))
-                            (t
-                             (multiple-value-list
-                              (eval (test-form test))))))))
+                         #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
+                                                                (when (test-property test :muffle-warnings t)
+                                                                  (muffle-warning c)))))
+                         (cond
+                           (*compile-tests*
+                            (multiple-value-list
+                             (funcall (compile-test test))))
+                           (*expanded-eval*
+                            (multiple-value-list
+                             (expanded-eval (test-form test))))
+                           (t
+                            (multiple-value-list
+                             (eval (test-form test))))))))
                 (if *catch-errors*
                     (handler-bind
-                     ((style-warning #'(lambda (c) (if (test-property test :muffle-warnings t)
-                                                       (muffle-warning c)
-                                                       c)))
-                      (error #'(lambda (c)
-                                 (setf aborted t)
-                                 (setf r (list c))
-                                 (return-from aborted nil))))
+                        ((style-warning #'(lambda (c) (if (test-property test :muffle-warnings t)
+                                                          (muffle-warning c)
+                                                          c)))
+                         (error #'(lambda (c)
+                                    (setf aborted t)
+                                    (setf r (list c))
+                                    (return-from aborted nil))))
                       (%do))
                     (%do)))))
 
@@ -353,36 +329,36 @@
    compiler optimizations will fold away runtime computation."
   (if (not (consp form))
       (eval form)
-   (let ((op (car form)))
-     (cond
-      ((eq op 'let)
-       (let* ((bindings (loop for b in (cadr form)
-                              collect (if (consp b) b (list b nil))))
-              (vars (mapcar #'car bindings))
-              (binding-forms (mapcar #'cadr bindings)))
-         (apply
-          (the function
-            (eval `(lambda ,vars ,@(cddr form))))
-          (mapcar #'eval binding-forms))))
-      ((and (eq op 'let*) (cadr form))
-       (let* ((bindings (loop for b in (cadr form)
-                              collect (if (consp b) b (list b nil))))
-              (vars (mapcar #'car bindings))
-              (binding-forms (mapcar #'cadr bindings)))
-         (funcall
-          (the function
-            (eval `(lambda (,(car vars) &aux ,@(cdr bindings)) ,@(cddr form))))
-          (eval (car binding-forms)))))
-      ((eq op 'progn)
-       (loop for e on (cdr form)
-             do (if (null (cdr e)) (return (eval (car e)))
-                  (eval (car e)))))
-      ((and (symbolp op) (fboundp op)
-            (not (macro-function op))
-            (not (special-operator-p op)))
-       (apply (symbol-function op)
-              (mapcar #'eval (cdr form))))
-      (t (eval form))))))
+      (let ((op (car form)))
+        (cond
+          ((eq op 'let)
+           (let* ((bindings (loop for b in (cadr form)
+                                  collect (if (consp b) b (list b nil))))
+                  (vars (mapcar #'car bindings))
+                  (binding-forms (mapcar #'cadr bindings)))
+             (apply
+              (the function
+                   (eval `(lambda ,vars ,@(cddr form))))
+              (mapcar #'eval binding-forms))))
+          ((and (eq op 'let*) (cadr form))
+           (let* ((bindings (loop for b in (cadr form)
+                                  collect (if (consp b) b (list b nil))))
+                  (vars (mapcar #'car bindings))
+                  (binding-forms (mapcar #'cadr bindings)))
+             (funcall
+              (the function
+                   (eval `(lambda (,(car vars) &aux ,@(cdr bindings)) ,@(cddr form))))
+              (eval (car binding-forms)))))
+          ((eq op 'progn)
+           (loop for e on (cdr form)
+                 do (if (null (cdr e)) (return (eval (car e)))
+                        (eval (car e)))))
+          ((and (symbolp op) (fboundp op)
+                (not (macro-function op))
+                (not (special-operator-p op)))
+           (apply (symbol-function op)
+                  (mapcar #'eval (cdr form))))
+          (t (eval form))))))
 
 (defun continue-testing ()
   (if *in-test*
@@ -471,9 +447,10 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 
 (defun compile-tests
     (stream tests
-     &optional (number-of-tests (length tests))
-               (batch-size (min number-of-tests *compile-batch-size*))
-               silent)
+     &key (number-of-tests (length tests))
+          (batch-size (min number-of-tests *compile-batch-size*))
+          (muffle-warnings t)
+          silent)
   "Compile all test functions in batches"
   (do ((remaining-tests tests (nthcdr batch-size remaining-tests))
        (remaining-number-of-tests number-of-tests (- remaining-number-of-tests batch-size))
@@ -481,7 +458,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
       ((or (null remaining-tests) (<= remaining-number-of-tests 0)))
     (unless (or silent
                 (let ((processed-number-of-tests
-                       (- number-of-tests remaining-number-of-tests)))
+                        (- number-of-tests remaining-number-of-tests)))
                   ;; only output the message every 1024 tests
                   (= (ceiling processed-number-of-tests 1024)
                      (ceiling (+ processed-number-of-tests batch-size)
@@ -493,15 +470,12 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         ((or (null current-tests) (>= n batch-size)
              (>= n remaining-number-of-tests)))
       (let ((test (first current-tests)))
-        (when (test-property test :muffle-warnings t)
-          (push `(setf (test-function ,test)
-                       (lambda ()
-                         (declare (optimize ,@*optimization-settings*))
-                         ,(test-form test)))
-                body))))
+        (push `(setf (test-compiled-form (gethash ',(test-name test) *items*))
+                     ,(test-thunk test))
+              body)))
     (multiple-value-bind (function warnings-p failure-p)
         (handler-case
-            (compile* `(lambda () ,@body))
+            (compile* `(lambda () ,@body) muffle-warnings)
           (warning () (values nil t t))
           (error () (values nil t t)))
       (declare (ignore warnings-p))
@@ -512,8 +486,10 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                       (test-name (first remaining-tests)))
               ;; Something went wrong, try to narrow down where
               (compile-tests stream remaining-tests
-                               batch-size (floor batch-size 2)
-                               t))))))
+                             :number-of-tests batch-size
+                             :batch-size (floor batch-size 2)
+                             :silent t
+                             :muffle-warnings muffle-warnings))))))
 
 (defun %do-tests (s)
   (let ((count (count t (the list *tests*) :key #'test-pending)))
@@ -521,7 +497,17 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
             count (length *tests*))
     (finish-output s)
     (when *compile-tests*
-      (compile-tests s *tests*))
+      ; Make two passes to account for muffle-warnings
+      (compile-tests s (remove-if (lambda (test)
+                                    (or (test-property test :muffle-warnings t)
+                                        (not (test-pending test))))
+                                  *tests*)
+                     :muffle-warnings nil)
+      (compile-tests s (remove-if (lambda (test)
+                                    (or (not (test-property test :muffle-warnings t))
+                                        (not (test-pending test))))
+                                  *tests*)
+                     :muffle-warnings t))
     (dolist (test *tests*)
       (when (test-pending test)
         (let ((success? (%do-test test s)))
@@ -574,7 +560,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                                                                                                 *load-pathname*
                                                                                                 *default-pathname-defaults*))
                                                                         '("sandbox"))))
-        (test-vector (coerce tests 'simple-vector)))
+         (test-vector (coerce tests 'simple-vector)))
     (let ((n (length test-vector)))
       (when (= n 0) (error "Must provide at least one test."))
       (loop for i from 0
