@@ -244,64 +244,105 @@
             (compile* (test-thunk test)
                       (test-property test :muffle-warnings t)))))
 
+(defun %do-test/default (test stream)
+  (flet ((%do ()
+           (handler-bind
+               #-sbcl nil
+             #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
+                                                    (when (test-property test :muffle-warnings t)
+                                                      (muffle-warning c)))))
+             (cond (*compile-tests*
+                    (multiple-value-list
+                     (funcall (compile-test test))))
+                   (*expanded-eval*
+                    (multiple-value-list
+                     (expanded-eval (test-form test))))
+                   (t
+                    (multiple-value-list
+                     (eval (test-form test)))))))
+         (print-failure (&optional (value nil valuep))
+           (let ((*print-circle* *print-circle-on-failure*))
+             (format stream
+                     "~&Test ~:@(~S~) ~:[aborted~;failed~]~%Form: ~S~%Expected value~P:~%"
+                     (test-name test) valuep (test-form test) (length (test-vals test)))
+             (dolist (v (test-vals test)) (format stream "~10t~S~%" v))
+             (when valuep
+               (handler-case
+                   (progn
+                     (format stream "Actual value~P:~%" (length value))
+                     (dolist (v value)
+                       (format stream "~10t~S~:[~; [~2:*~A]~]~%"
+                               v (typep v 'condition))))
+                 (error ()
+                   (format stream "Actual value: #<error during printing>~%"))))
+             (finish-output stream))))
+    (let (r)
+      (if *catch-errors*
+          (handler-bind
+              ((style-warning #'(lambda (c)
+                                  (if (test-property test :muffle-warnings t)
+                                      (muffle-warning c)
+                                      c)))
+               (error #'(lambda (c)
+                          (declare (ignore c))
+                          (print-failure)
+                          (return-from %do-test/default nil))))
+            (setf r (%do)))
+          (setf r (%do)))
+      (cond ((equalp-with-case r (test-vals test))
+             t)
+            (t
+             (print-failure r)
+             nil)))))
+
+(defun %do-test/error (test stream)
+  (handler-case
+      (cond (*compile-tests*
+             (multiple-value-list
+              (funcall (compile-test test))))
+            (*expanded-eval*
+             (multiple-value-list
+              (expanded-eval (test-form test))))
+            (t
+             (multiple-value-list
+              (eval (test-form test)))))
+    (error (condition)
+      (cond ((typep condition (first (test-vals test)))
+             t)
+            (t
+             (let ((*print-circle* *print-circle-on-failure*))
+               (format stream
+                       "~&Test ~:@(~S~) failed~%Form: ~S~%Expected ~S error~%"
+                       (test-name test) (test-form test) (first (test-vals test)))
+               (finish-output stream))
+             nil)))
+    (:no-error (value)
+      (let ((*print-circle* *print-circle-on-failure*))
+        (format stream
+                "~&Test ~:@(~S~) failed~%Form: ~S~%Expected ~S error:~%"
+                     (test-name test) (test-form test) (first (test-vals test)))
+        (handler-case
+            (progn
+              (format stream "Actual value~P:~%" (length value))
+              (dolist (v value)
+                (format stream "~10t~S~:[~; [~2:*~A]~]~%"
+                        v (typep v 'condition))))
+          (error ()
+            (format stream "Actual value: #<error during printing>~%"))))
+      nil)))
+
 (defun %do-test (test &optional (s *standard-output*))
   (catch '*in-test*
-    (setq *test* (test-name test))
-    (setf (test-pending test) t)
-    (let* ((*in-test* t)
-           ;; (*break-on-warnings* t)
-           (aborted nil)
-           r)
-      ;; (declare (special *break-on-warnings*))
-
-      (block aborted
-        (setf r
-              (flet ((%do ()
-                       (handler-bind
-                           #-sbcl nil
-                         #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
-                                                                (when (test-property test :muffle-warnings t)
-                                                                  (muffle-warning c)))))
-                         (cond
-                           (*compile-tests*
-                            (multiple-value-list
-                             (funcall (compile-test test))))
-                           (*expanded-eval*
-                            (multiple-value-list
-                             (expanded-eval (test-form test))))
-                           (t
-                            (multiple-value-list
-                             (eval (test-form test))))))))
-                (if *catch-errors*
-                    (handler-bind
-                        ((style-warning #'(lambda (c) (if (test-property test :muffle-warnings t)
-                                                          (muffle-warning c)
-                                                          c)))
-                         (error #'(lambda (c)
-                                    (setf aborted t)
-                                    (setf r (list c))
-                                    (return-from aborted nil))))
-                      (%do))
-                    (%do)))))
-
-      (setf (test-pending test)
-            (or aborted
-                (not (equalp-with-case r (test-vals test)))))
-
-      (when (test-pending test)
-        (let ((*print-circle* *print-circle-on-failure*))
-          (format s "~&Test ~:@(~S~) failed~%Form: ~S~%Expected value~P:~%"
-                  *test* (test-form test) (length (test-vals test)))
-          (dolist (v (test-vals test)) (format s "~10t~S~%" v))
-          (handler-case
-              (progn
-                (format s "Actual value~P:~%" (length r))
-                (dolist (v r)
-                  (format s "~10t~S~:[~; [~2:*~A]~]~%"
-                          v (typep v 'condition))))
-            (error () (format s "Actual value: #<error during printing>~%")))
-          (finish-output s)))))
-  (when (not (test-pending test)) *test*))
+    (let ((*test* (test-name test))
+          (*in-test* t))
+      (prog2
+          (setf (test-pending test) t)
+          (case (test-property test :result)
+            (:error
+             (%do-test/error test s))
+            (otherwise
+             (%do-test/default test s)))
+        (setf (test-pending test) nil)))))
 
 (defun expanded-eval (form)
   "Split off top level of a form and eval separately.  This reduces the chance that
@@ -394,7 +435,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 (defun do-tests (package
                  &key (out *standard-output*)
                       ((:catch-errors *catch-errors*) *catch-errors*)
-                      ((:compile *compile-tests*) *compile-tests*)
+                      ((:compile-tests *compile-tests*) *compile-tests*)
                       (expected-failures nil expected-failures-p)
                       skip-failing-tests (skip-failing-notes t)
                       exit)
@@ -498,7 +539,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                  (push (test-name test) *failed-tests*)
                  (unless (test-property test :expected-failure)
                    (push (test-name test) *unexpected-failures*))))
-          (format s "~@[~<~%~:; ~:@(~S~)~>~]" success?))
+          (format s "~@[~<~%~:; ~:@(~S~)~>~]" (test-name test)))
         (finish-output s)))
     (setq *passed-tests* (nreverse *passed-tests*)
           *failed-tests* (nreverse *failed-tests*)
