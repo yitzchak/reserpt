@@ -13,7 +13,7 @@
   "Note database")
 (defvar *in-test* nil "Used by TEST")
 (defvar *debug* nil "For debugging")
-(defvar *catch-errors* t "When true, causes errors in a test to be caught.")
+(defvar *abort-on-error* t "When true signaled ERROR in a test becomes a test abort.")
 (defvar *print-circle-on-failure* nil
   "Failure reports are printed with *PRINT-CIRCLE* bound to this value.")
 
@@ -136,7 +136,7 @@
 (defun (setf test-property) (new-value test indicator &optional default-value)
   (setf (getf (test-properties test) indicator default-value) new-value))
 
-(defun get-tests (package)
+(defun get-tests (package names)
   (with-package-iterator (next-symbol package :internal :external)
     (prog ((tests nil)
            (items (make-hash-table :test #'eq))
@@ -150,7 +150,12 @@
               (setf item (copy-test item)
                     (test-properties item) (copy-list (test-properties item))
                     (gethash (test-name item) items) item
-                    tests (merge 'list tests (list (copy-test item)) #'< :key #'test-number)))
+                    tests (merge 'list tests (list (copy-test item)) #'< :key #'test-number))
+              (when names
+                (setf (test-property item :skip) (not (or (member (test-name item) names)
+                                                          (some (lambda (note)
+                                                                  (member note names))
+                                                                (test-notes item)))))))
              (note
               (setf item (copy-note item)
                     (note-properties item) (copy-list (note-properties item))
@@ -170,7 +175,7 @@
   nil)
 
 (defun do-test (name
-                &key ((:catch-errors *catch-errors*) *catch-errors*)
+                &key ((:abort-on-error *abort-on-error*) *abort-on-error*)
                      ((:compile *compile-tests*) *compile-tests*)
                 &aux (test (get name :reserpt)))
   (if (test-p test)
@@ -232,7 +237,7 @@
       (compile nil lambda-expr)))
 
 (defun test-thunk (test)
-  (let ((declarations (test-property test :declarations *compile-declarations*)))
+  (let ((declarations (test-property test :compile-declarations *compile-declarations*)))
     `(lambda ()
        ,@(when declarations
            `((declare ,@declarations)))
@@ -244,6 +249,14 @@
             (compile* (test-thunk test)
                       (test-property test :muffle-warnings t)))))
 
+(defun %do-test/actual (test)
+  (cond ((test-property test :compile *compile-tests*)
+         (multiple-value-list (funcall (compile-test test))))
+        ((test-property test :expanded *expanded-eval*)
+         (multiple-value-list (expanded-eval (test-form test))))
+        (t
+         (multiple-value-list (eval (test-form test))))))
+
 (defun %do-test/default (test stream)
   (flet ((%do ()
            (handler-bind
@@ -251,15 +264,7 @@
              #+sbcl ((sb-ext:code-deletion-note #'(lambda (c)
                                                     (when (test-property test :muffle-warnings t)
                                                       (muffle-warning c)))))
-             (cond (*compile-tests*
-                    (multiple-value-list
-                     (funcall (compile-test test))))
-                   (*expanded-eval*
-                    (multiple-value-list
-                     (expanded-eval (test-form test))))
-                   (t
-                    (multiple-value-list
-                     (eval (test-form test)))))))
+             (%do-test/actual test)))
          (print-failure (&optional (value nil valuep))
            (let ((*print-circle* *print-circle-on-failure*))
              (format stream
@@ -277,7 +282,7 @@
                    (format stream "Actual value: #<error during printing>~%"))))
              (finish-output stream))))
     (let (r)
-      (if *catch-errors*
+      (if (test-property test :abort-on-error *abort-on-error*)
           (handler-bind
               ((style-warning #'(lambda (c)
                                   (if (test-property test :muffle-warnings t)
@@ -297,15 +302,7 @@
 
 (defun %do-test/error (test stream)
   (handler-case
-      (cond (*compile-tests*
-             (multiple-value-list
-              (funcall (compile-test test))))
-            (*expanded-eval*
-             (multiple-value-list
-              (expanded-eval (test-form test))))
-            (t
-             (multiple-value-list
-              (eval (test-form test)))))
+      (%do-test/actual test)
     (error (condition)
       (cond ((typep condition (first (test-vals test)))
              t)
@@ -432,9 +429,66 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 
 (defparameter *sandbox-path* (ignore-errors (truename #P"sandbox/")))
 
+(defun %do-tests (s)
+  (let ((count (count t (the list *tests*) :key #'test-pending)))
+    (format s "~&Doing ~A pending test~:P of ~A test~:P total.~%"
+            count (length *tests*))
+    (finish-output s)
+    ;; Make two passes to account for muffle-warnings
+    (compile-tests s (remove-if (lambda (test)
+                                  (or (test-property test :muffle-warnings t)
+                                      (not (test-property test :compile *compile-tests*))
+                                      (not (test-pending test))))
+                                *tests*)
+                   :muffle-warnings nil)
+    (compile-tests s (remove-if (lambda (test)
+                                  (or (not (test-property test :muffle-warnings t))
+                                      (not (test-property test :compile *compile-tests*))
+                                      (not (test-pending test))))
+                                *tests*)
+                   :muffle-warnings t)
+    (dolist (test *tests*)
+      (when (test-pending test)
+        (let ((success? (%do-test test s)))
+          (cond (success?
+                 (push (test-name test) *passed-tests*)
+                 (when (test-property test :expected-failure)
+                   (push (test-name test) *unexpected-successes*)))
+                (t
+                 (push (test-name test) *failed-tests*)
+                 (unless (test-property test :expected-failure)
+                   (push (test-name test) *unexpected-failures*))))
+          (format s "~@[~<~%~:; ~:@(~S~)~>~]" (test-name test)))
+        (finish-output s)))
+    (setq *passed-tests* (nreverse *passed-tests*)
+          *failed-tests* (nreverse *failed-tests*)
+          *unexpected-failures* (nreverse *unexpected-failures*)
+          *unexpected-successes* (nreverse *unexpected-successes*))
+    (format s
+            "~&~@[Found unknown test or note names in expected failure list:~
+                  ~%  ~<~@{~S~^, ~:_~}~:>~%~]~
+             ~A failure~:P with ~A unexpected failure~:P and ~A unexpected ~
+             success~:*~[es~;~:;es~] out of ~A test~:P.~%~
+             ~:[No failures~;~:*Failures: ~{~%  ~S~}~]~%~
+             ~:[No unexpected failures~;~:*Unexpected failures: ~{~%  ~S~}~]~%~
+             ~:[No unexpected successes~;~:*Unexpected successes: ~{~%  ~S~}~]~%"
+            *unknown-expected-failures*
+            (length *failed-tests*) (length *unexpected-failures*)
+            (length *unexpected-successes*) count
+            *failed-tests* *unexpected-failures*
+            *unexpected-successes*)
+    (terpri)
+    (finish-output s)
+    (values (null *unexpected-failures*)
+            *passed-tests*
+            *failed-tests*
+            *unexpected-failures*
+            *unexpected-successes*)))
+
 (defun do-tests (package
-                 &key (out *standard-output*)
-                      ((:catch-errors *catch-errors*) *catch-errors*)
+                 &key tests
+                      (out *standard-output*)
+                      ((:abort-on-error *abort-on-error*) *abort-on-error*)
                       ((:compile-tests *compile-tests*) *compile-tests*)
                       (expected-failures nil expected-failures-p)
                       skip-failing-tests (skip-failing-notes t)
@@ -445,7 +499,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (*unexpected-failures* nil)
         (*unexpected-successes* nil))
     (multiple-value-bind (*tests* *items*)
-        (get-tests *package*)
+        (get-tests *package* tests)
       (when expected-failures-p
         (load-expected-failures expected-failures skip-failing-tests skip-failing-notes)
         (loop for test in *tests*
@@ -511,79 +565,32 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
                              :silent t
                              :muffle-warnings muffle-warnings))))))
 
-(defun %do-tests (s)
-  (let ((count (count t (the list *tests*) :key #'test-pending)))
-    (format s "~&Doing ~A pending test~:P of ~A test~:P total.~%"
-            count (length *tests*))
-    (finish-output s)
-    (when *compile-tests*
-      ; Make two passes to account for muffle-warnings
-      (compile-tests s (remove-if (lambda (test)
-                                    (or (test-property test :muffle-warnings t)
-                                        (not (test-pending test))))
-                                  *tests*)
-                     :muffle-warnings nil)
-      (compile-tests s (remove-if (lambda (test)
-                                    (or (not (test-property test :muffle-warnings t))
-                                        (not (test-pending test))))
-                                  *tests*)
-                     :muffle-warnings t))
-    (dolist (test *tests*)
-      (when (test-pending test)
-        (let ((success? (%do-test test s)))
-          (cond (success?
-                 (push (test-name test) *passed-tests*)
-                 (when (test-property test :expected-failure)
-                   (push (test-name test) *unexpected-successes*)))
-                (t
-                 (push (test-name test) *failed-tests*)
-                 (unless (test-property test :expected-failure)
-                   (push (test-name test) *unexpected-failures*))))
-          (format s "~@[~<~%~:; ~:@(~S~)~>~]" (test-name test)))
-        (finish-output s)))
-    (setq *passed-tests* (nreverse *passed-tests*)
-          *failed-tests* (nreverse *failed-tests*)
-          *unexpected-failures* (nreverse *unexpected-failures*)
-          *unexpected-successes* (nreverse *unexpected-successes*))
-    (format s
-            "~&~@[Found unknown test or note names in expected failure list:~
-                  ~%  ~<~@{~S~^, ~:_~}~:>~%~]~
-             ~A failure~:P with ~A unexpected failure~:P and ~A unexpected ~
-             success~:*~[es~;~:;es~] out of ~A test~:P.~%~
-             ~:[No failures~;~:*Failures: ~{~%  ~S~}~]~%~
-             ~:[No unexpected failures~;~:*Unexpected failures: ~{~%  ~S~}~]~%~
-             ~:[No unexpected successes~;~:*Unexpected successes: ~{~%  ~S~}~]~%"
-            *unknown-expected-failures*
-            (length *failed-tests*) (length *unexpected-failures*)
-            (length *unexpected-successes*) count
-            *failed-tests* *unexpected-failures*
-            *unexpected-successes*)
-    (terpri)
-    (finish-output s)
-    (values (null *unexpected-failures*)
-            *passed-tests*
-            *failed-tests*
-            *unexpected-failures*
-            *unexpected-successes*)))
-
 ;;; Extended random regression
 
 (defun do-extended-tests (package
-                          &key (tests *passed-tests*) (count nil)
-                               ((:catch-errors *catch-errors*) *catch-errors*)
+                          &key tests (count nil)
+                               ((:abort-on-error *abort-on-error*) *abort-on-error*)
                                ((:compile *compile-tests*) *compile-tests*))
   "Execute randomly chosen tests from TESTS until one fails or until
    COUNT is an integer and that many tests have been executed."
-  (let* ((*package* (find-package package))
-         (*tests* (get-tests *package*))
+  (let ((*package* (find-package package))
+        (*failed-tests* nil)
+        (*passed-tests* nil)
+        (*unexpected-failures* nil)
+        (*unexpected-successes* nil)
          (*default-pathname-defaults* (make-pathname :directory (append (pathname-directory (or *compile-file-pathname*
                                                                                                 *load-pathname*
                                                                                                 *default-pathname-defaults*))
-                                                                        '("sandbox"))))
-         (test-vector (coerce tests 'simple-vector)))
-    (let ((n (length test-vector)))
-      (when (= n 0) (error "Must provide at least one test."))
-      (loop for i from 0
+                                                                        '("sandbox")))))
+    (multiple-value-bind (*tests* *items*)
+        (get-tests *package* tests)
+      (loop with test-vector = (coerce (loop for test in *tests*
+                                       unless (test-property test :skip)
+                                         collect test)
+                                       'simple-vector)
+            with n = (length test-vector)
+            initially (when (= n 0)
+                        (error "Must provide at least one test."))
             for name = (svref test-vector (random n))
             until (eql i count)
             do (print name)
