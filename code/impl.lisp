@@ -17,14 +17,12 @@
 (defvar *print-circle-on-failure* nil
   "Failure reports are printed with *PRINT-CIRCLE* bound to this value.")
 
-(defvar *compile-tests* nil "When true, compile the tests before running them.")
-(defvar *expanded-eval* nil "When true, convert the tests into a form that is less likely to have compiler optimizations.")
+(defvar *test-execution* :eval)
 (defvar *compile-declarations* '((optimize (safety 3))))
 (defvar *compile-batch-size*
   #+ecl 512
   #-ecl 16
   "Number of tests to compile at the same time.")
-
 
 (defvar *failed-tests* nil "After DO-TESTS, becomes the list of names of tests that have failed")
 (defvar *passed-tests* nil "After DO-TESTS, becomes the list of names of tests that have passed")
@@ -72,7 +70,7 @@
 
 ;;; Note handling functions and macros
 
-(defun add-note (note)
+(defun %defnote (note)
   (let ((previous (get (note-name note) :reserpt)))
     (typecase previous
       (note
@@ -88,7 +86,7 @@
     (declare (ignore initials))
     (when rest
       (error "Non-empty body in note"))
-    `(add-note (make-note :name ',name
+    `(%defnote (make-note :name ',name
                           :documentation ',documentation
                           :properties ',properties))))
 
@@ -103,7 +101,7 @@
   compiled-form
   vals)
 
-(defun add-test (test)
+(defun %deftest (test)
   (let ((previous (get (test-name test) :reserpt)))
     (typecase previous
       (test
@@ -117,18 +115,12 @@
 (defmacro deftest (name &rest body)
   (multiple-value-bind (documentation properties initials rest)
       (parse-properties body :notes)
-    `(add-test (make-test :name ',name
+    `(%deftest (make-test :name ',name
                           :documentation ',documentation
                           :properties ',properties
                           :form ',(pop rest)
                           :vals ',rest
                           ,@initials))))
-
-(defun has-note (test note)
-  (unless (note-p note)
-    (let ((new-note (get note :reserpt)))
-      (setf note new-note)))
-  (and note (not (not (member note (test-notes test))))))
 
 (defun test-property (test indicator &optional default-value)
   (getf (test-properties test) indicator default-value))
@@ -166,27 +158,13 @@
            (go next)))
        (return (values tests items)))))
 
-(defun report-error (error? &rest args)
-  (cond (*debug*
-         (apply #'format t args)
-         (if error? (throw '*debug* nil)))
-        (error? (apply #'error args))
-        (t (apply #'warn args)))
-  nil)
-
 (defun do-test (name
                 &key ((:abort-on-error *abort-on-error*) *abort-on-error*)
-                     ((:compile *compile-tests*) *compile-tests*)
+                     ((:execution *test-execution*) *test-execution*)
                 &aux (test (get name :reserpt)))
   (if (test-p test)
       (%do-test test)
       (error "~%No test with name ~:@(~S~)." name)))
-
-(defun my-aref (a &rest args)
-  (apply #'aref a args))
-
-(defun my-row-major-aref (a index)
-  (row-major-aref a index))
 
 (defun equalp-with-case (x y)
   "Like EQUALP, but doesn't do case conversion of characters.
@@ -199,7 +177,7 @@
           (equalp-with-case (cdr x) (cdr y))))
     ((and (typep x 'array)
           (= (array-rank x) 0))
-     (equalp-with-case (my-aref x) (my-aref y)))
+     (equalp-with-case (aref x) (aref y)))
     ((typep x 'vector)
      (and (typep y 'vector)
           (let ((x-len (length x))
@@ -207,8 +185,8 @@
             (and (eql x-len y-len)
                  (loop
                    for i from 0 below x-len
-                   for e1 = (my-aref x i)
-                   for e2 = (my-aref y i)
+                   for e1 = (aref x i)
+                   for e2 = (aref y i)
                    always (equalp-with-case e1 e2))))))
     ((and (typep x 'array)
           (typep y 'array)
@@ -220,8 +198,8 @@
      (and (typep y 'array)
           (let ((size (array-total-size x)))
             (loop for i from 0 below size
-                  always (equalp-with-case (my-row-major-aref x i)
-                                           (my-row-major-aref y i))))))
+                  always (equalp-with-case (row-major-aref x i)
+                                           (row-major-aref y i))))))
     ((typep x 'pathname)
      (equal x y))
     (t (eql x y))))
@@ -250,12 +228,13 @@
                       (test-property test :muffle-warnings t)))))
 
 (defun %do-test/actual (test)
-  (cond ((test-property test :compile *compile-tests*)
-         (multiple-value-list (funcall (compile-test test))))
-        ((test-property test :expanded *expanded-eval*)
-         (multiple-value-list (expanded-eval (test-form test))))
-        (t
-         (multiple-value-list (eval (test-form test))))))
+  (ecase (test-property test :execution *test-execution*)
+    (:compile
+     (multiple-value-list (funcall (compile-test test))))
+    (:expanded-eval
+     (multiple-value-list (expanded-eval (test-form test))))
+    (:eval
+     (multiple-value-list (eval (test-form test))))))
 
 (defun %do-test/default (test stream)
   (flet ((%do ()
@@ -437,13 +416,15 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
     ;; Make two passes to account for muffle-warnings
     (compile-tests s (remove-if (lambda (test)
                                   (or (test-property test :muffle-warnings t)
-                                      (not (test-property test :compile *compile-tests*))
+                                      (not (eq (test-property test :execution *test-execution*)
+                                               :compile))
                                       (not (test-pending test))))
                                 *tests*)
                    :muffle-warnings nil)
     (compile-tests s (remove-if (lambda (test)
                                   (or (not (test-property test :muffle-warnings t))
-                                      (not (test-property test :compile *compile-tests*))
+                                      (not (eq (test-property test :execution *test-execution*)
+                                               :compile))
                                       (not (test-pending test))))
                                 *tests*)
                    :muffle-warnings t)
@@ -487,9 +468,9 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 
 (defun do-tests (package
                  &key tests
-                      (out *standard-output*)
+                      (stream *standard-output*)
                       ((:abort-on-error *abort-on-error*) *abort-on-error*)
-                      ((:compile-tests *compile-tests*) *compile-tests*)
+                      ((:execution *test-execution*) *test-execution*)
                       (expected-failures nil expected-failures-p)
                       skip-failing-tests (skip-failing-notes t)
                       exit)
@@ -510,10 +491,10 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
       (dolist (test *tests*)
         (setf (test-pending test) (not (test-property test :skip))))
       (let* ((*default-pathname-defaults* *sandbox-path*)
-             (successp (if (streamp out)
-                           (%do-tests out)
+             (successp (if (streamp stream)
+                           (%do-tests stream)
                            (with-open-file
-                               (stream out :direction :output)
+                               (stream stream :direction :output)
                              (%do-tests stream)))))
         (when exit
           (exit successp))
@@ -570,7 +551,7 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
 (defun do-extended-tests (package
                           &key tests (count nil)
                                ((:abort-on-error *abort-on-error*) *abort-on-error*)
-                               ((:compile *compile-tests*) *compile-tests*))
+                               ((:execution *test-execution*) *test-execution*))
   "Execute randomly chosen tests from TESTS until one fails or until
    COUNT is an integer and that many tests have been executed."
   (let ((*package* (find-package package))
