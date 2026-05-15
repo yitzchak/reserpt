@@ -44,22 +44,33 @@
 (defstruct note
   name
   documentation
-  properties)
+  properties
+  notes)
 
 (defun note-property (note indicator &optional default-value)
-  (getf (note-properties note) indicator default-value))
+  (prog ((value (getf (note-properties note) indicator note))
+         (notes (note-notes note)))
+     (unless (eq value note)
+       (return value))
+   next
+     (when notes
+       (setf value (note-property (gethash (pop notes) *items*) indicator note))
+       (if (eq value note)
+           (go next)
+           (return value)))
+     (return default-value)))
 
 (defun (setf note-property) (new-value note indicator &optional default-value)
   (setf (getf (note-properties note) indicator default-value) new-value))
 
-(defun parse-properties (body &rest indicators)
+(defun parse-properties (body)
   (prog (documentation properties initials)
      (when (stringp (car body))
        (setf documentation (pop body)))
    next
      (unless (cdr body)
        (go end))
-     (when (member (car body) indicators)
+     (when (eq (car body) :notes)
        (setf (getf initials (pop body)) `',(pop body))
        (go next))
      (when (keywordp (car body))
@@ -114,7 +125,7 @@
 
 (defmacro deftest (name &rest body)
   (multiple-value-bind (documentation properties initials rest)
-      (parse-properties body :notes)
+      (parse-properties body)
     `(%deftest (make-test :name ',name
                           :documentation ',documentation
                           :properties ',properties
@@ -123,7 +134,17 @@
                           ,@initials))))
 
 (defun test-property (test indicator &optional default-value)
-  (getf (test-properties test) indicator default-value))
+  (prog ((value (getf (test-properties test) indicator test))
+         (notes (test-notes test)))
+     (unless (eq value test)
+       (return value))
+   next
+     (when notes
+       (setf value (note-property (gethash (pop notes) *items*) indicator test))
+       (if (eq value test)
+           (go next)
+           (return value)))
+     (return default-value)))
 
 (defun (setf test-property) (new-value test indicator &optional default-value)
   (setf (getf (test-properties test) indicator default-value) new-value))
@@ -143,15 +164,14 @@
                     (test-properties item) (copy-list (test-properties item))
                     (gethash (test-name item) items) item
                     tests (merge 'list tests (list (copy-test item)) #'< :key #'test-number))
-              (when names
-                (setf (test-property item :skip) (not (or (member (test-name item) names)
-                                                          (some (lambda (note)
-                                                                  (member note names))
-                                                                (test-notes item)))))))
+              (when (and names (member (test-name item) names))
+                (setf (test-property item :skip) nil)))
              (note
               (setf item (copy-note item)
                     (note-properties item) (copy-list (note-properties item))
-                    (gethash (note-name item) items) item))
+                    (gethash (note-name item) items) item)
+              (when (and names (member (note-name item) names))
+                (setf (note-property item :skip) nil)))
              (null)
              (t
               (error "Unknown reserpt object")))
@@ -466,18 +486,14 @@ above. if-does-not-exist is passed to OPEN so it behaves as it does there."
         (*failed-tests* nil)
         (*passed-tests* nil)
         (*unexpected-failures* nil)
-        (*unexpected-successes* nil))
+        (*unexpected-successes* nil)
+        (default-skip (and tests t)))
     (multiple-value-bind (*tests* *items*)
         (get-tests *package* tests)
       (when expected-failures-p
-        (load-expected-failures expected-failures skip-failing-tests skip-failing-notes)
-        (loop for test in *tests*
-              do (loop for note-name in (test-notes test)
-                       do (loop for (indicator value) on
-                                    (note-properties (gethash note-name *items*)) by #'cddr
-                                do (setf (test-property test indicator) value)))))
+        (load-expected-failures expected-failures skip-failing-tests skip-failing-notes))
       (dolist (test *tests*)
-        (setf (test-pending test) (not (test-property test :skip))))
+        (setf (test-pending test) (not (test-property test :skip default-skip))))
       (let* ((*default-pathname-defaults* *sandbox-path*)
              (successp (if (streamp stream)
                            (%do-tests stream)
