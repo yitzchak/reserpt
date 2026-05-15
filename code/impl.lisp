@@ -167,42 +167,30 @@
       (error "~%No test with name ~:@(~S~)." name)))
 
 (defun equalp-with-case (x y)
-  "Like EQUALP, but doesn't do case conversion of characters.
-   Currently doesn't work on arrays of dimension > 2."
-  (cond
-    ((eq x y) t)
-    ((consp x)
-     (and (consp y)
-          (equalp-with-case (car x) (car y))
-          (equalp-with-case (cdr x) (cdr y))))
-    ((and (typep x 'array)
-          (= (array-rank x) 0))
-     (equalp-with-case (aref x) (aref y)))
-    ((typep x 'vector)
-     (and (typep y 'vector)
-          (let ((x-len (length x))
-                (y-len (length y)))
-            (and (eql x-len y-len)
-                 (loop
-                   for i from 0 below x-len
-                   for e1 = (aref x i)
-                   for e2 = (aref y i)
-                   always (equalp-with-case e1 e2))))))
-    ((and (typep x 'array)
-          (typep y 'array)
-          (not (equal (array-dimensions x)
-                      (array-dimensions y))))
-     nil)
-
-    ((typep x 'array)
-     (and (typep y 'array)
-          (let ((size (array-total-size x)))
-            (loop for i from 0 below size
-                  always (equalp-with-case (row-major-aref x i)
-                                           (row-major-aref y i))))))
-    ((typep x 'pathname)
-     (equal x y))
-    (t (eql x y))))
+  "Like EQUALP, but doesn't do case conversion of characters."
+  (or (eq x y)
+      (typecase x
+        (cons
+         (and (consp y)
+              (equalp-with-case (car x) (car y))
+              (equalp-with-case (cdr x) (cdr y))))
+        (vector
+         (and (vectorp y)
+              (eql (length x) (length y))
+              (every #'equalp-with-case x y)))
+        (array
+         (and (arrayp y)
+              (= (array-rank x) (array-rank y))
+              (if (zerop (array-rank x))
+                  (equalp-with-case (aref x) (aref y))
+                  (and (equal (array-dimensions x) (array-dimensions y))
+                       (loop for i below (array-total-size x)
+                             always (equalp-with-case (row-major-aref x i)
+                                                      (row-major-aref y i)))))))
+        (pathname
+         (equal x y))
+        (t
+         (eql x y)))))
 
 (defun compile* (lambda-expr &optional muffle-warnings)
   (if muffle-warnings
